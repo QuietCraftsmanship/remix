@@ -4,7 +4,9 @@ title: CSS Bundling
 
 # CSS Bundling
 
-Some CSS features in Remix bundle styles into a single file that you load manually into the application including:
+<docs-warning>This documentation is only relevant when using the [Classic Remix Compiler][classic-remix-compiler]. If you're using [Remix Vite][remix-vite], you should refer to [Vite's CSS documentation][vite-css] instead.</docs-warning>
+
+Some CSS features in Remix bundle styles into a single file that you load manually into the application, including:
 
 - [CSS Side Effect Imports][css-side-effect-imports]
 - [CSS Modules][css-modules]
@@ -47,3 +49,6 @@ Avoid using `export *` due to an [issue with `esbuild`'s CSS tree shaking][esbui
 [css-modules]: ./css-modules
 [vanilla-extract]: ./vanilla-extract
 [regular-stylesheet-imports]: ./css
+[classic-remix-compiler]: ../guides/vite#classic-remix-compiler-vs-remix-vite
+[remix-vite]: ../guides/vite
+[vite-css]: https://vitejs.dev/guide/features#css

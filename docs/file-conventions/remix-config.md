@@ -1,10 +1,13 @@
 ---
 title: remix.config.js
+hidden: true
 ---
 
 # remix.config.js
 
-This file has a few build and development configuration options, but does not actually run on your server.
+<docs-warning>`remix.config.js` is only relevant when using the [Classic Remix Compiler][classic-remix-compiler]. When using [Remix Vite][remix-vite], this file should not be present in your project. Instead, Remix configuration should be provided to the Remix plugin in your [Vite config][vite-config].</docs-warning>
+
+This file has a few build and development configuration options but does not run on your server.
 
 ```js filename=remix.config.js
 /** @type {import('@remix-run/dev').AppConfig} */
@@ -41,7 +44,7 @@ exports.appDirectory = "./elsewhere";
 ## assetsBuildDirectory
 
 The path to the browser build, relative to remix.config.js. Defaults to
-"public/build". Should be deployed to static hosting.
+`"public/build"`. Should be deployed to static hosting.
 
 ## browserNodeBuiltinsPolyfill
 
@@ -71,13 +74,7 @@ relative to `remix.config.js`. Defaults to `".cache"`.
 
 ## future
 
-The `future` config lets you opt-into future breaking changes via [Future Flags][future-flags]. The following future flags currently exist in Remix v2 and will become the default behavior in Remix v3:
-
-- **`v3_fetcherPersist`**: Change fetcher persistence/cleanup behavior in 2 ways ([RFC][fetcherpersist-rfc]):
-  - Fetchers are no longer removed on unmount, and remain exposed via [`useFetchers`][use-fetchers] until they return to an `idle` state
-  - Fetchers that complete while still mounted no longer persist in [`useFetchers`][use-fetchers] since you can access those fetchers via [`useFetcher`][use-fetcher]
-- **`v3_relativeSplatPath`**: Fixes buggy relative path resolution in splat routes. Please see the [React Router docs][relativesplatpath] for more information.
-- **`v3_throwAbortReason`**: When a server-side request is aborted, Remix will throw the `request.signal.reason` instead of an error such as `new Error("query() call aborted...")`
+The `future` config lets you opt-into future breaking changes via [Future Flags][future-flags]. Please see the [Current Future Flags][current-future-flags] section for a list of all available Future Flags.
 
 ## ignoredRouteFiles
 
@@ -98,7 +95,7 @@ module.exports = {
 };
 ```
 
-If you wish to serve static assets from a separate domain you may also specify an absolute path:
+If you wish to serve static assets from a separate domain, you may also specify an absolute path:
 
 ```js filename=remix.config.js
 /** @type {import('@remix-run/dev').AppConfig} */
@@ -166,7 +163,7 @@ field in `package.json`.
 
 A list of regex patterns that determines if a module is transpiled and included
 in the server bundle. This can be useful when consuming ESM only packages in a
-CJS build, or when consuming packages with [CSS side effect
+CJS build or when consuming packages with [CSS side effect
 imports][css_side_effect_imports].
 
 For example, the `unified` ecosystem is all ESM-only. Let's also say we're using
@@ -237,7 +234,7 @@ The platform the server build is targeting, which can either be `"neutral"` or
 
 ## tailwind
 
-Whether to support [Tailwind functions and directives][tailwind_functions_and_directives] in CSS files if `tailwindcss` is installed. Defaults to `true`.
+Whether to support [Tailwind CSS functions and directives][tailwind_functions_and_directives] in CSS files if `tailwindcss` is installed. Defaults to `true`.
 
 ```js filename=remix.config.js
 /** @type {import('@remix-run/dev').AppConfig} */
@@ -278,7 +275,7 @@ There are a few conventions that Remix uses you should be aware of.
 [browser-node-builtins-polyfill]: #browsernodebuiltinspolyfill
 [server-node-builtins-polyfill]: #servernodebuiltinspolyfill
 [future-flags]: ../start/future-flags
-[fetcherpersist-rfc]: https://github.com/remix-run/remix/discussions/7698
-[use-fetchers]: ../hooks/use-fetchers
-[use-fetcher]: ../hooks/use-fetcher
-[relativesplatpath]: https://reactrouter.com/en/main/hooks/use-resolved-path#splat-paths
+[current-future-flags]: ../start/future-flags#current-future-flags
+[classic-remix-compiler]: ../guides/vite#classic-remix-compiler-vs-remix-vite
+[remix-vite]: ../guides/vite
+[vite-config]: ./vite-config

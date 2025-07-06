@@ -7,7 +7,7 @@ toc: false
 
 The "root" route (`app/root.tsx`) is the only _required_ route in your Remix application because it is the parent to all routes in your `routes/` directory and is in charge of rendering the root `<html>` document.
 
-Beyond that, it's mostly just like any other route and supports all of the standard route exports:
+Beyond that, it's mostly just like any other route and supports all the standard route exports:
 
 - [`headers`][headers]
 - [`meta`][meta]
@@ -22,7 +22,7 @@ Beyond that, it's mostly just like any other route and supports all of the stand
 - [`handle`][handle]
 - [`shouldRevalidate`][shouldrevalidate]
 
-Because the root route manages your document, it is the proper place to render a handful of "document-level" components Remix provides. These components are to be used once inside your root route and they include everything Remix figured out or built in order for your page to render properly.
+Because the root route manages your document, it is the proper place to render a handful of "document-level" components Remix provides. These components are to be used once inside your root route, and they include everything Remix figured out or built in order for your page to render properly.
 
 ```tsx filename=app/root.tsx
 import type { LinksFunction } from "@remix-run/node"; // or cloudflare/deno
@@ -81,7 +81,7 @@ export default function App() {
 
 ## Layout Export
 
-Because the root route manages the document for all routes, it also supports an additional optional `Layout` export. You can read the details in this [RFC][layout-rfc] but the layout route serves 2 purposes:
+Because the root route manages the document for all routes, it also supports an additional optional `Layout` export. You can read the details in this [RFC][layout-rfc] but the layout route serves two purposes:
 
 - Avoid duplicating your document/"app shell" across your root component, `HydrateFallback`, and `ErrorBoundary`
 - Avoids React from re-mounting your app shell elements when switching between the root component/`HydrateFallback`/`ErrorBoundary` which can cause a FOUC if React removes and re-adds `<link rel="stylesheet">` tags from your `<Links>` component.
@@ -142,6 +142,58 @@ export function ErrorBoundary() {
       <h1>Error!</h1>
       <p>{error?.message ?? "Unknown error"}</p>
     </>
+  );
+}
+```
+
+**A note on `useLoaderData`in the `Layout` Component**
+
+`useLoaderData` is not permitted to be used in `ErrorBoundary` components because it is intended for the happy-path route rendering, and its typings have a built-in assumption that the `loader` ran successfully and returned something. That assumption doesn't hold in an `ErrorBoundary` because it could have been the `loader` that threw and triggered the boundary! To access loader data in `ErrorBoundary`'s, you can use `useRouteLoaderData` which accounts for the loader data potentially being `undefined`.
+
+Because your `Layout` component is used in both success and error flows, this same restriction holds. If you need to fork logic in your `Layout` depending on if it was a successful request or not, you can use `useRouteLoaderData("root")` and `useRouteError()`.
+
+<docs-warn>Because your `<Layout>` component is used for rendering the `ErrorBoundary`, you should be _very defensive_ to ensure that you can render your `ErrorBoundary` without encountering any render errors. If your `Layout` throws another error trying to render the boundary, then it can't be used and your UI will fall back to the very minimal built-in default `ErrorBoundary`.</docs-warn>
+
+```tsx filename="app/root.tsx" lines=[6-7,19-29,32-34]
+export function Layout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const data = useRouteLoaderData("root");
+  const error = useRouteError();
+
+  return (
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1"
+        />
+        <Meta />
+        <Links />
+        <style
+          dangerouslySetInnerHTML={{
+            __html: `
+              :root {
+                --themeVar: ${
+                  data?.themeVar || defaultThemeVar
+                }
+              }
+            `,
+          }}
+        />
+      </head>
+      <body>
+        {data ? (
+          <Analytics token={data.analyticsToken} />
+        ) : null}
+        {children}
+        <ScrollRestoration />
+        <Scripts />
+      </body>
+    </html>
   );
 }
 ```

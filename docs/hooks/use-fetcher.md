@@ -19,7 +19,7 @@ export function SomeComponent() {
 
 ### `key`
 
-By default, `useFetcher` generate a unique fetcher scoped to that component (however, it may be looked up in [`useFetchers()`][use_fetchers] while in-flight). If you want to identify a fetcher with your own key such that you can access it from elsewhere in your app, you can do that with the `key` option:
+By default, `useFetcher` generates a unique fetcher scoped to that component (however, it may be looked up in [`useFetchers()`][use_fetchers] while in-flight). If you want to identify a fetcher with your own key such that you can access it from elsewhere in your app, you can do that with the `key` option:
 
 ```tsx lines=[2,8]
 function AddToBagButton() {
@@ -70,21 +70,40 @@ The `formData` can be multiple types:
 
 - [`FormData`][form_data] - A `FormData` instance.
 - [`HTMLFormElement`][html_form_element] - A [`<form>`][form_element] DOM element.
-- `Object` - An object of key/value pairs that will be converted to a `FormData` instance.
+- `Object` - An object of key/value pairs that will be converted to a `FormData` instance by default. You can pass a more complex object and serialize it as JSON by specifying `encType: "application/json"`. See [`useSubmit`][use-submit] for more details.
 
 If the method is `GET`, then the route [`loader`][loader] is being called and with the `formData` serialized to the url as [`URLSearchParams`][url_search_params]. If `DELETE`, `PATCH`, `POST`, or `PUT`, then the route [`action`][action] is being called with `formData` as the body.
 
 ```tsx
+// Submit a FormData instance (GET request)
+const formData = new FormData();
+fetcher.submit(formData);
+
+// Submit the HTML form element
 fetcher.submit(event.currentTarget.form, {
   method: "POST",
 });
 
+// Submit key/value JSON as a FormData instance
 fetcher.submit(
   { serialized: "values" },
   { method: "POST" }
 );
 
-fetcher.submit(formData);
+// Submit raw JSON
+fetcher.submit(
+  {
+    deeply: {
+      nested: {
+        json: "values",
+      },
+    },
+  },
+  {
+    method: "POST",
+    encType: "application/json",
+  }
+);
 ```
 
 `fetcher.submit` is a wrapper around a [`useSubmit`][use-submit] call for the fetcher instance, so it also accepts the same options as `useSubmit`.
@@ -93,14 +112,18 @@ fetcher.submit(formData);
 
 Loads data from a route loader. While multiple nested routes can match a URL, only the leaf route will be called.
 
+Note that when calling `load` on an index route's loader, you must include an [`?index` query param][index-query-param] to disambiguate between the `index.tsx` layout and the `root.tsx` route.
+
 ```ts
 fetcher.load("/some/route");
 fetcher.load("/some/route?foo=bar");
 ```
 
-#### `options.unstable_flushSync`
+`fetcher.load`'s revalidate by default after action submissions and explicit revalidation requests via [`useRevalidator`][userevalidator]. Because `fetcher.load` loads a specific URL they don't revalidate on changes to route param or URL search param. You can use [`shouldRevalidate`][shouldrevalidate] to optimize which data should be reloaded.
 
-The `unstable_flushSync` option tells React Router DOM to wrap the initial state update for this `fetcher.load` in a [`ReactDOM.flushSync`][flush-sync] call instead of the default [`React.startTransition`][start-transition]. This allows you to perform synchronous DOM actions immediately after the update is flushed to the DOM.
+#### `options.flushSync`
+
+The `flushSync` option tells React Router DOM to wrap the initial state update for this `fetcher.load` in a [`ReactDOM.flushSync`][flush-sync] call instead of the default [`React.startTransition`][start-transition]. This allows you to perform synchronous DOM actions immediately after the update is flushed to the DOM.
 
 <docs-warning>`ReactDOM.flushSync` de-optimizes React and can hurt the performance of your app.</docs-warning>
 
@@ -110,9 +133,9 @@ The `unstable_flushSync` option tells React Router DOM to wrap the initial state
 
 You can know the state of the fetcher with `fetcher.state`. It will be one of:
 
-- **idle** - Nothing is being fetched.
-- **submitting** - A form has been submitted. If the method is `GET`, then the route `loader` is being called. If `DELETE`, `PATCH`, `POST`, or `PUT`, then the route `action` is being called.
-- **loading** - The loaders for the routes are being reloaded after an `action` submission.
+- **idle** — Nothing is being fetched.
+- **submitting** — A form has been submitted. If the method is `GET`, then the route `loader` is being called. If `DELETE`, `PATCH`, `POST`, or `PUT`, then the route `action` is being called.
+- **loading** — The loaders for the routes are being reloaded after an `action` submission.
 
 ### `fetcher.data`
 
@@ -157,3 +180,6 @@ The form method of the submission.
 [flush-sync]: https://react.dev/reference/react-dom/flushSync
 [start-transition]: https://react.dev/reference/react/startTransition
 [use-submit]: ./use-submit
+[userevalidator]: ./use-revalidator
+[shouldrevalidate]: ../route/should-revalidate#shouldrevalidate
+[index-query-param]: ../guides/index-query-param

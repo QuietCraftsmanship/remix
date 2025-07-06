@@ -171,8 +171,8 @@ When you send HTML from the server, it's best to have it work even before JavaSc
 
 When the user submits the form before JavaScript loads:
 
-1. The browser submits the form to the action (instead of `fetch`) and the browsers pending states activate (spinning favicon)
-2. After the action complets, loaders are called
+1. The browser submits the form to the action (instead of `fetch`) and the browsers' pending states activate (spinning favicon)
+2. After the action completes, loaders are called
 3. Remix renders the page and sends HTML to the browser
 
 [loader]: ../route/loader

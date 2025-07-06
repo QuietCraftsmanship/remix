@@ -1,11 +1,9 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import lambdaTester from "lambda-tester";
+import { createRequestHandler as createRemixRequestHandler } from "@remix-run/node";
+import { Headers as RemixHeaders } from "@remix-run/web-fetch";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
-import {
-  createRequestHandler as createRemixRequestHandler,
-  Response as NodeResponse,
-} from "@remix-run/node";
+import lambdaTester from "lambda-tester";
 
 import {
   createRequestHandler,
@@ -201,7 +199,7 @@ describe("architect createRemixHeaders", () => {
   describe("creates fetch headers from architect headers", () => {
     it("handles empty headers", () => {
       let headers = createRemixHeaders({});
-      expect(headers.raw()).toMatchInlineSnapshot(`Object {}`);
+      expect(Object.fromEntries(headers.entries())).toMatchInlineSnapshot(`{}`);
     });
 
     it("handles simple headers", () => {
@@ -220,7 +218,7 @@ describe("architect createRemixHeaders", () => {
         "x-foo": "bar, baz",
         "x-bar": "baz",
       });
-      expect(headers.getAll("x-foo")).toEqual(["bar, baz"]);
+      expect(headers.get("x-foo")).toEqual("bar, baz");
       expect(headers.get("x-bar")).toBe("baz");
     });
 
@@ -229,9 +227,21 @@ describe("architect createRemixHeaders", () => {
         "__session=some_value",
         "__other=some_other_value",
       ]);
-      expect(headers.getAll("cookie")).toEqual([
-        "__session=some_value; __other=some_other_value",
-      ]);
+      expect(headers.get("cookie")).toEqual(
+        "__session=some_value; __other=some_other_value"
+      );
+    });
+
+    it("handles multiple request cookies when using @remix-run/web-fetch", () => {
+      let headers = createRemixHeaders(
+        {},
+        ["__session=some_value", "__other=some_other_value"],
+        // @ts-expect-error types don't align since it's not fully spec compliant
+        RemixHeaders
+      );
+      expect(headers.get("cookie")).toEqual(
+        "__session=some_value; __other=some_other_value"
+      );
     });
   });
 });
@@ -249,14 +259,14 @@ describe("architect createRemixRequest", () => {
 
 describe("sendRemixResponse", () => {
   it("handles regular responses", async () => {
-    let response = new NodeResponse("anything");
+    let response = new Response("anything");
     let result = await sendRemixResponse(response);
     expect(result.body).toBe("anything");
   });
 
   it("handles resource routes with regular data", async () => {
     let json = JSON.stringify({ foo: "bar" });
-    let response = new NodeResponse(json, {
+    let response = new Response(json, {
       headers: {
         "Content-Type": "application/json",
         "content-length": json.length.toString(),
@@ -271,7 +281,7 @@ describe("sendRemixResponse", () => {
   it("handles resource routes with binary data", async () => {
     let image = await fsp.readFile(path.join(__dirname, "554828.jpeg"));
 
-    let response = new NodeResponse(image, {
+    let response = new Response(image, {
       headers: {
         "content-type": "image/jpeg",
         "content-length": image.length.toString(),

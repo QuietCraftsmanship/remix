@@ -1,10 +1,14 @@
 import { PassThrough } from "node:stream";
 import { test, expect } from "@playwright/test";
 
-import { PlaywrightFixture } from "./helpers/playwright-fixture";
-import type { Fixture, AppFixture } from "./helpers/create-fixture";
-import { createFixtureProject } from "./helpers/create-fixture";
-import { createAppFixture, createFixture, js } from "./helpers/create-fixture";
+import { PlaywrightFixture } from "./helpers/playwright-fixture.js";
+import type { Fixture, AppFixture } from "./helpers/create-fixture.js";
+import { createFixtureProject } from "./helpers/create-fixture.js";
+import {
+  createAppFixture,
+  createFixture,
+  js,
+} from "./helpers/create-fixture.js";
 
 let fixture: Fixture;
 let appFixture: AppFixture;
@@ -60,6 +64,20 @@ test.describe("flat routes", () => {
         "app/routes/flat.file.tsx": js`
           export default function () {
             return <h2>Flat File</h2>;
+          }
+        `,
+
+        "app/routes/.dotfile": `
+          DOTFILE SHOULD BE IGNORED
+        `,
+
+        "app/routes/.route-with-unescaped-leading-dot.tsx": js`
+          throw new Error("This file should be ignored as a route");
+        `,
+
+        "app/routes/[.]route-with-escaped-leading-dot.tsx": js`
+          export default function () {
+            return <h2>Route With Escaped Leading Dot</h2>;
           }
         `,
 
@@ -144,6 +162,17 @@ test.describe("flat routes", () => {
 </div>`);
     });
 
+    test("renders matching routes (route with escaped leading dot)", async ({
+      page,
+    }) => {
+      let app = new PlaywrightFixture(appFixture, page);
+      await app.goto("/.route-with-escaped-leading-dot");
+      expect(await app.getHtml("#content")).toBe(`<div id="content">
+  <h1>Root</h1>
+  <h2>Route With Escaped Leading Dot</h2>
+</div>`);
+    });
+
     test("renders matching routes (nested)", async ({ page }) => {
       let app = new PlaywrightFixture(appFixture, page);
       await app.goto("/dashboard");
@@ -156,7 +185,7 @@ test.describe("flat routes", () => {
   }
 
   test("allows ignoredRouteFiles to be configured", async () => {
-    let routeIds = Object.keys(fixture.build.routes);
+    let routeIds = Object.keys(fixture.build!.routes);
 
     expect(routeIds).not.toContain(IGNORED_ROUTE);
   });

@@ -1,24 +1,28 @@
 import * as path from "node:path";
 import { execSync } from "node:child_process";
-import * as fse from "fs-extra";
+import fse from "fs-extra";
 import getPort, { makeRange } from "get-port";
 import prettyMs from "pretty-ms";
-import NPMCliPackageJson from "@npmcli/package-json";
-import { coerce } from "semver";
+import PackageJson from "@npmcli/package-json";
 import pc from "picocolors";
+import exitHook from "exit-hook";
 
 import * as colors from "../colors";
 import * as compiler from "../compiler";
 import * as devServer from "../devServer";
 import * as devServer_unstable from "../devServer_unstable";
 import type { RemixConfig } from "../config";
+import type { ViteDevOptions } from "../vite/dev";
+import type { ViteBuildOptions } from "../vite/build";
 import { readConfig } from "../config";
-import { formatRoutes, RoutesFormat, isRoutesFormat } from "../config/format";
+import { formatRoutes, type RoutesFormat } from "../config/format";
+import { loadVitePluginContext } from "../vite/plugin";
 import { detectPackageManager } from "./detectPackageManager";
 import { transpile as convertFileToJS } from "./useJavascript";
 import type { Options } from "../compiler/options";
 import { createFileWatchCache } from "../compiler/fileWatchCache";
 import { logger } from "../tux";
+import * as profiler from "../vite/profiler";
 
 type InitFlags = {
   deleteScript?: boolean;
@@ -36,7 +40,6 @@ export async function init(
   }
 
   let initPackageJson = path.resolve(initScriptDir, "package.json");
-  let isTypeScript = fse.existsSync(path.join(projectDir, "tsconfig.json"));
   let packageManager = detectPackageManager() ?? "npm";
 
   if (await fse.pathExists(initPackageJson)) {
@@ -51,7 +54,7 @@ export async function init(
     initFn = initFn.default;
   }
   try {
-    await initFn({ isTypeScript, packageManager, rootDirectory: projectDir });
+    await initFn({ packageManager, rootDirectory: projectDir });
 
     if (deleteScript) {
       await fse.remove(initScriptDir);
@@ -80,25 +83,35 @@ export function setup() {
 
 export async function routes(
   remixRoot?: string,
-  formatArg?: string
+  flags: {
+    config?: string;
+    json?: boolean;
+  } = {}
 ): Promise<void> {
-  let config = await readConfig(remixRoot);
+  let ctx = await loadVitePluginContext({
+    root: remixRoot,
+    configFile: flags.config,
+  });
 
-  let format = isRoutesFormat(formatArg) ? formatArg : RoutesFormat.jsx;
+  let routes =
+    ctx?.remixConfig.routes ||
+    // v3 TODO: Remove this and require the presence of a Vite config
+    (await readConfig(remixRoot)).routes;
 
-  console.log(formatRoutes(config.routes, format));
+  let format: RoutesFormat = flags.json ? "json" : "jsx";
+  console.log(formatRoutes(routes, format));
 }
 
 export async function build(
   remixRoot: string,
-  modeArg?: string,
+  mode?: string,
   sourcemap: boolean = false
 ): Promise<void> {
-  let mode = parseMode(modeArg) ?? "production";
+  mode = mode ?? "production";
 
   logger.info(`building...` + pc.gray(` (NODE_ENV=${mode})`));
 
-  if (modeArg === "production" && sourcemap) {
+  if (mode === "production" && sourcemap) {
     logger.warn("🚨  source maps enabled in production", {
       details: [
         "You are using `--sourcemap` to enable source maps in production,",
@@ -134,11 +147,30 @@ export async function build(
   logger.info("built" + pc.gray(` (${prettyMs(Date.now() - start)})`));
 }
 
+export async function viteBuild(
+  root?: string,
+  options: ViteBuildOptions = {}
+): Promise<void> {
+  if (!root) {
+    root = process.env.REMIX_ROOT || process.cwd();
+  }
+
+  let { build } = await import("../vite/build");
+  if (options.profile) {
+    await profiler.start();
+  }
+  try {
+    await build(root, options);
+  } finally {
+    await profiler.stop(logger.info);
+  }
+}
+
 export async function watch(
   remixRootOrConfig: string | RemixConfig,
-  modeArg?: string
+  mode?: string
 ): Promise<void> {
-  let mode = parseMode(modeArg) ?? "development";
+  mode = mode ?? "development";
   console.log(`Watching Remix app in ${mode} mode...`);
 
   let config =
@@ -147,7 +179,7 @@ export async function watch(
       : await readConfig(remixRootOrConfig);
 
   let resolved = await resolveDev(config);
-  devServer.liveReload(config, resolved);
+  void devServer.liveReload(config, { ...resolved, mode });
   return await new Promise(() => {});
 }
 
@@ -171,22 +203,33 @@ export async function dev(
   let config = await readConfig(remixRoot);
 
   let resolved = await resolveDevServe(config, flags);
-  await devServer_unstable.serve(config, resolved);
+  devServer_unstable.serve(config, resolved);
+
+  // keep `remix dev` alive by waiting indefinitely
+  await new Promise(() => {});
+}
+
+export async function viteDev(root: string, options: ViteDevOptions = {}) {
+  let { dev } = await import("../vite/dev");
+  if (options.profile) {
+    await profiler.start();
+  }
+  exitHook(() => profiler.stop(console.info));
+  await dev(root, options);
+
+  // keep `remix vite-dev` alive by waiting indefinitely
+  await new Promise(() => {});
 }
 
 let clientEntries = ["entry.client.tsx", "entry.client.js", "entry.client.jsx"];
 let serverEntries = ["entry.server.tsx", "entry.server.js", "entry.server.jsx"];
 let entries = ["entry.client", "entry.server"];
 
-// @ts-expect-error available in node 12+
-// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/ListFormat#browser_compatibility
 let conjunctionListFormat = new Intl.ListFormat("en", {
   style: "long",
   type: "conjunction",
 });
 
-// @ts-expect-error available in node 12+
-// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/ListFormat#browser_compatibility
 let disjunctionListFormat = new Intl.ListFormat("en", {
   style: "long",
   type: "disjunction",
@@ -195,14 +238,28 @@ let disjunctionListFormat = new Intl.ListFormat("en", {
 export async function generateEntry(
   entry: string,
   remixRoot: string,
-  useTypeScript: boolean = true
+  flags: {
+    typescript?: boolean;
+    config?: string;
+  } = {}
 ) {
-  let config = await readConfig(remixRoot);
+  let ctx = await loadVitePluginContext({
+    root: remixRoot,
+    configFile: flags.config,
+  });
+
+  let { rootDirectory, appDirectory } = ctx
+    ? {
+        rootDirectory: ctx.rootDirectory,
+        appDirectory: ctx.remixConfig.appDirectory,
+      }
+    : // v3 TODO: Remove this and require the presence of a Vite config
+      await readConfig(remixRoot);
 
   // if no entry passed, attempt to create both
   if (!entry) {
-    await generateEntry("entry.client", remixRoot, useTypeScript);
-    await generateEntry("entry.server", remixRoot, useTypeScript);
+    await generateEntry("entry.client", remixRoot, flags);
+    await generateEntry("entry.server", remixRoot, flags);
     return;
   }
 
@@ -216,22 +273,8 @@ export async function generateEntry(
     return;
   }
 
-  let pkgJson = await NPMCliPackageJson.load(config.rootDirectory);
+  let pkgJson = await PackageJson.load(rootDirectory);
   let deps = pkgJson.content.dependencies ?? {};
-
-  let maybeReactVersion = coerce(deps.react);
-  if (!maybeReactVersion) {
-    let react = ["react", "react-dom"];
-    let list = conjunctionListFormat.format(react);
-    throw new Error(
-      `Could not determine React version. Please install the following packages: ${list}`
-    );
-  }
-
-  let type =
-    maybeReactVersion.major >= 18 || maybeReactVersion.raw === "0.0.0"
-      ? ("stream" as const)
-      : ("string" as const);
 
   let serverRuntime = deps["@remix-run/deno"]
     ? "deno"
@@ -256,49 +299,30 @@ export async function generateEntry(
     return;
   }
 
-  let clientRenderer = deps["@remix-run/react"] ? "react" : undefined;
-
-  if (!clientRenderer) {
-    console.error(
-      colors.error(
-        `Could not determine runtime. Please install the following: @remix-run/react`
-      )
-    );
-    return;
-  }
-
   let defaultsDirectory = path.resolve(__dirname, "..", "config", "defaults");
-  let defaultEntryClient = path.resolve(
-    defaultsDirectory,
-    `entry.client.${clientRenderer}-${type}.tsx`
-  );
+  let defaultEntryClient = path.resolve(defaultsDirectory, "entry.client.tsx");
   let defaultEntryServer = path.resolve(
     defaultsDirectory,
-    serverRuntime,
-    `entry.server.${clientRenderer}-${type}.tsx`
+    ctx?.remixConfig.ssr === false &&
+      ctx?.remixConfig.future.v3_singleFetch !== true
+      ? `entry.server.spa.tsx`
+      : `entry.server.${serverRuntime}.tsx`
   );
 
   let isServerEntry = entry === "entry.server";
 
   let contents = isServerEntry
-    ? await createServerEntry(
-        config.rootDirectory,
-        config.appDirectory,
-        defaultEntryServer
-      )
-    : await createClientEntry(
-        config.rootDirectory,
-        config.appDirectory,
-        defaultEntryClient
-      );
+    ? await createServerEntry(rootDirectory, appDirectory, defaultEntryServer)
+    : await createClientEntry(rootDirectory, appDirectory, defaultEntryClient);
 
+  let useTypeScript = flags.typescript ?? true;
   let outputExtension = useTypeScript ? "tsx" : "jsx";
   let outputEntry = `${entry}.${outputExtension}`;
-  let outputFile = path.resolve(config.appDirectory, outputEntry);
+  let outputFile = path.resolve(appDirectory, outputEntry);
 
   if (!useTypeScript) {
     let javascript = convertFileToJS(contents, {
-      cwd: config.rootDirectory,
+      cwd: rootDirectory,
       filename: isServerEntry ? defaultEntryServer : defaultEntryClient,
     });
     await fse.writeFile(outputFile, javascript, "utf-8");
@@ -309,7 +333,7 @@ export async function generateEntry(
   console.log(
     colors.blue(
       `Entry file ${entry} created at ${path.relative(
-        config.rootDirectory,
+        rootDirectory,
         outputFile
       )}.`
     )
@@ -351,17 +375,6 @@ async function createClientEntry(
   let contents = await fse.readFile(inputFile, "utf-8");
   return contents;
 }
-
-let parseMode = (
-  mode?: string
-): compiler.CompileOptions["mode"] | undefined => {
-  if (mode === undefined) return undefined;
-  if (mode === "development") return mode;
-  if (mode === "production") return mode;
-  if (mode === "test") return mode;
-  console.error(`Unrecognized mode: ${mode}`);
-  process.exit(1);
-};
 
 let findPort = async () => getPort({ port: makeRange(3001, 3100) });
 

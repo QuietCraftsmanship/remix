@@ -1,41 +1,95 @@
-import type { AgnosticRouteMatch, Location, Params } from "@remix-run/router";
+import type {
+  ActionFunction as RRActionFunction,
+  ActionFunctionArgs as RRActionFunctionArgs,
+  AgnosticRouteMatch,
+  LoaderFunction as RRLoaderFunction,
+  LoaderFunctionArgs as RRLoaderFunctionArgs,
+  Location,
+  Params,
+} from "@remix-run/router";
 
-import type { AppLoadContext, AppData } from "./data";
+import type { AppData, AppLoadContext } from "./data";
 import type { LinkDescriptor } from "./links";
 import type { SerializeFrom } from "./serialize";
 
 export interface RouteModules<RouteModule> {
-  [routeId: string]: RouteModule;
+  [routeId: string]: RouteModule | undefined;
 }
 
 /**
- * The arguments passed to ActionFunction and LoaderFunction.
- *
- * Note this is almost identical to React Router's version but over there the
- * context is optional since it's only there during static handler invocations.
- * Keeping Remix's own definition for now so it can differentiate between
- * client/server
+ * @deprecated Use `LoaderFunctionArgs`/`ActionFunctionArgs` instead
  */
-export interface DataFunctionArgs {
-  request: Request;
+export type DataFunctionArgs = RRActionFunctionArgs<AppLoadContext> &
+  RRLoaderFunctionArgs<AppLoadContext> & {
+    // Context is always provided in Remix, and typed for module augmentation support.
+    // RR also doesn't export DataFunctionArgs, so we extend the two interfaces here
+    // even tough they're identical under the hood
+    context: AppLoadContext;
+  };
+
+/**
+ * A function that handles data mutations for a route on the server
+ */
+export type ActionFunction = (
+  args: ActionFunctionArgs
+) => ReturnType<RRActionFunction>;
+
+/**
+ * Arguments passed to a route `action` function
+ */
+export type ActionFunctionArgs = RRActionFunctionArgs<AppLoadContext> & {
+  // Context is always provided in Remix, and typed for module augmentation support.
   context: AppLoadContext;
-  params: Params;
-}
-
-export type LoaderArgs = DataFunctionArgs;
-
-export type ActionArgs = DataFunctionArgs;
+};
 
 /**
- * A function that handles data mutations for a route.
+ * A function that handles data mutations for a route on the client
+ * @private Public API is exported from @remix-run/react
  */
-export interface ActionFunction {
-  (args: DataFunctionArgs):
-    | Promise<Response>
-    | Response
-    | Promise<AppData>
-    | AppData;
-}
+type ClientActionFunction = (
+  args: ClientActionFunctionArgs
+) => ReturnType<RRActionFunction>;
+
+/**
+ * Arguments passed to a route `clientAction` function
+ * @private Public API is exported from @remix-run/react
+ */
+export type ClientActionFunctionArgs = RRActionFunctionArgs<undefined> & {
+  serverAction: <T = AppData>() => Promise<SerializeFrom<T>>;
+};
+
+/**
+ * A function that loads data for a route on the server
+ */
+export type LoaderFunction = (
+  args: LoaderFunctionArgs
+) => ReturnType<RRLoaderFunction>;
+
+/**
+ * Arguments passed to a route `loader` function
+ */
+export type LoaderFunctionArgs = RRLoaderFunctionArgs<AppLoadContext> & {
+  // Context is always provided in Remix, and typed for module augmentation support.
+  context: AppLoadContext;
+};
+
+/**
+ * A function that loads data for a route on the client
+ * @private Public API is exported from @remix-run/react
+ */
+type ClientLoaderFunction = ((
+  args: ClientLoaderFunctionArgs
+) => ReturnType<RRLoaderFunction>) & {
+  hydrate?: boolean;
+};
+
+/**
+ * Arguments passed to a route `clientLoader` function
+ * @private Public API is exported from @remix-run/react
+ */
+export type ClientLoaderFunctionArgs = RRLoaderFunctionArgs<undefined> & {
+  serverLoader: <T = AppData>() => Promise<SerializeFrom<T>>;
+};
 
 export type HeadersArgs = {
   loaderHeaders: Headers;
@@ -58,17 +112,6 @@ export interface HeadersFunction {
  */
 export interface LinksFunction {
   (): LinkDescriptor[];
-}
-
-/**
- * A function that loads data for a route.
- */
-export interface LoaderFunction {
-  (args: DataFunctionArgs):
-    | Promise<Response>
-    | Response
-    | Promise<AppData>
-    | AppData;
 }
 
 /**
@@ -131,7 +174,10 @@ export interface LoaderFunction {
  */
 export interface ServerRuntimeMetaFunction<
   Loader extends LoaderFunction | unknown = unknown,
-  ParentsLoaders extends Record<string, LoaderFunction> = {}
+  ParentsLoaders extends Record<string, LoaderFunction | unknown> = Record<
+    string,
+    unknown
+  >
 > {
   (
     args: ServerRuntimeMetaArgs<Loader, ParentsLoaders>
@@ -145,13 +191,17 @@ interface ServerRuntimeMetaMatch<
   id: RouteId;
   pathname: AgnosticRouteMatch["pathname"];
   data: Loader extends LoaderFunction ? SerializeFrom<Loader> : unknown;
-  handle?: unknown;
+  handle?: RouteHandle;
   params: AgnosticRouteMatch["params"];
   meta: ServerRuntimeMetaDescriptor[];
+  error?: unknown;
 }
 
 type ServerRuntimeMetaMatches<
-  MatchLoaders extends Record<string, unknown> = Record<string, unknown>
+  MatchLoaders extends Record<string, LoaderFunction | unknown> = Record<
+    string,
+    unknown
+  >
 > = Array<
   {
     [K in keyof MatchLoaders]: ServerRuntimeMetaMatch<
@@ -163,7 +213,10 @@ type ServerRuntimeMetaMatches<
 
 export interface ServerRuntimeMetaArgs<
   Loader extends LoaderFunction | unknown = unknown,
-  MatchLoaders extends Record<string, unknown> = Record<string, unknown>
+  MatchLoaders extends Record<string, LoaderFunction | unknown> = Record<
+    string,
+    unknown
+  >
 > {
   data:
     | (Loader extends LoaderFunction ? SerializeFrom<Loader> : AppData)
@@ -171,6 +224,7 @@ export interface ServerRuntimeMetaArgs<
   params: Params;
   location: Location;
   matches: ServerRuntimeMetaMatches<MatchLoaders>;
+  error?: unknown;
 }
 
 export type ServerRuntimeMetaDescriptor =
@@ -193,10 +247,14 @@ type LdJsonValue = LdJsonPrimitive | LdJsonObject | LdJsonArray;
 /**
  * An arbitrary object that is associated with a route.
  */
-export type RouteHandle = any;
+export type RouteHandle = unknown;
 
 export interface EntryRouteModule {
+  clientAction?: ClientActionFunction;
+  clientLoader?: ClientLoaderFunction;
   ErrorBoundary?: any; // Weakly typed because server-runtime is not React-aware
+  HydrateFallback?: any; // Weakly typed because server-runtime is not React-aware
+  Layout?: any; // Weakly typed because server-runtime is not React-aware
   default: any; // Weakly typed because server-runtime is not React-aware
   handle?: RouteHandle;
   links?: LinksFunction;

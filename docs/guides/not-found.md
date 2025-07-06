@@ -11,14 +11,16 @@ There are two primary cases where a Remix site should send a 404:
 - The URL doesn't match any routes in the app
 - Your loader didn't find any data
 
-The first case is already handled by Remix, you don't have to throw a response yourself. It knows your routes, so it knows if nothing matched (_consider using a [Splat Route][splat-route] to handle this case_). The second case is up to you, but it's really easy.
+Remix already handles the first case, you don't have to throw a response yourself. It knows your routes, so it knows if nothing matched (_consider using a [Splat Route][splat-route] to handle this case_). The second case is up to you, but it's really easy.
 
 ## How to Send a 404
 
-As soon as you know you don't have what the user is looking for you should _throw a response_.
+As soon as you know you don't have what the user is looking for, you should _throw a response_.
 
 ```tsx filename=app/routes/page.$slug.tsx
-export async function loader({ params }: LoaderArgs) {
+export async function loader({
+  params,
+}: LoaderFunctionArgs) {
   const page = await db.page.findOne({
     where: { slug: params.slug },
   });
@@ -34,7 +36,7 @@ export async function loader({ params }: LoaderArgs) {
 }
 ```
 
-Remix will catch the response and send your app down the \[Error Boundary]\[error-boundary] path. It's actually exactly like Remix's automatic [error handling][errors], but instead of receiving an `Error` from `useRouteError()`, you'll receive an object with your response `status`, `statusText`, and extracted `data`.
+Remix will catch the response and send your app down the [Error Boundary][error-boundary] path. It's actually exactly like Remix's automatic [error handling][errors], but instead of receiving an `Error` from `useRouteError()`, you'll receive an object with your response `status`, `statusText`, and extracted `data`.
 
 What's nice about throwing a response is that code in your loader _stops executing_. The rest of your code doesn't have to deal with the chance that the page is defined or not (this is especially handy for TypeScript).
 
@@ -42,7 +44,7 @@ Throwing also ensures that your route component doesn't render if the loader was
 
 ## Root Error Boundary
 
-You probably already have one at the root of your app. This will handle all thrown responses that weren't handled in a nested route. Here's a sample:
+You probably already have one at the root of your app. This will handle all thrown responses not handled in a nested route. Here's a sample:
 
 ```tsx
 export function ErrorBoundary() {
@@ -69,6 +71,7 @@ export function ErrorBoundary() {
 }
 ```
 
+[error-boundary]: ../route/error-boundary
 [errors]: ./errors
 [404-status-code]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
-[splat-route]: ./routing#splats
+[splat-route]: ../file-conventions/routes#splat-routes

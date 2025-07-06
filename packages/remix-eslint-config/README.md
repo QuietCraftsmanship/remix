@@ -1,5 +1,8 @@
 # `@remix-run/eslint-config`
 
+> [!WARNING]
+> The `@remix-run/eslint-config` package is deprecated and will not be included in React Router v7. We recommend moving towards a streamlined ESLint config such as the ones included in the Remix templates. See https://github.com/remix-run/remix/blob/main/templates/remix/.eslintrc.cjs.
+
 This package includes a shareable ESLint config for Remix projects.
 
 If you create your app with `create-remix` no additional configuration is necessary.
@@ -40,7 +43,7 @@ Please note that because this ruleset is optional, we do not include the core li
   "dependencies": {
     "@testing-library/jest-dom": ">=5.16.0",
     "@testing-library/react": ">=12.0.0",
-    "jest": ">=26.0.0"
+    "jest": ">=28.0.0"
   }
 }
 ```

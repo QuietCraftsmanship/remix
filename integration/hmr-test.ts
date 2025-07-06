@@ -1,85 +1,19 @@
-import { test, expect } from "@playwright/test";
-import execa from "execa";
 import fs from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
-import getPort, { makeRange } from "get-port";
+import type { Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import execa from "execa";
+import getPort from "get-port";
 
-import type { FixtureInit } from "./helpers/create-fixture";
-import { createFixtureProject, css, js, json } from "./helpers/create-fixture";
+import type { FixtureInit } from "./helpers/create-fixture.js";
+import { createFixtureProject, css, js } from "./helpers/create-fixture.js";
+import { killtree } from "./helpers/killtree.js";
 
 test.setTimeout(150_000);
 
-let fixture = (options: { appPort: number; devPort: number }): FixtureInit => ({
-  config: {
-    serverModuleFormat: "cjs",
-    dev: {
-      port: options.devPort,
-    },
-  },
-  files: {
-    "package.json": json({
-      private: true,
-      sideEffects: false,
-      scripts: {
-        dev: `node ./node_modules/@remix-run/dev/dist/cli.js dev -c "node ./server.js"`,
-      },
-      dependencies: {
-        "@remix-run/css-bundle": "0.0.0-local-version",
-        "@remix-run/node": "0.0.0-local-version",
-        "@remix-run/react": "0.0.0-local-version",
-        "cross-env": "0.0.0-local-version",
-        express: "0.0.0-local-version",
-        isbot: "0.0.0-local-version",
-        "postcss-import": "0.0.0-local-version",
-        react: "0.0.0-local-version",
-        "react-dom": "0.0.0-local-version",
-        tailwindcss: "0.0.0-local-version",
-      },
-      devDependencies: {
-        "@remix-run/dev": "0.0.0-local-version",
-        "@types/react": "0.0.0-local-version",
-        "@types/react-dom": "0.0.0-local-version",
-        typescript: "0.0.0-local-version",
-      },
-      engines: {
-        node: ">=18.0.0",
-      },
-    }),
-
-    "server.js": js`
-      let path = require("node:path");
-      let express = require("express");
-      let { createRequestHandler } = require("@remix-run/express");
-      let { broadcastDevReady, installGlobals } = require("@remix-run/node");
-
-      installGlobals();
-
-      const app = express();
-      app.use(express.static("public", { immutable: true, maxAge: "1y" }));
-
-      const BUILD_DIR = path.join(process.cwd(), "build");
-      const build = require(BUILD_DIR);
-
-      app.all(
-        "*",
-        createRequestHandler({
-          build,
-          mode: build.mode,
-        })
-      );
-
-      let port = ${options.appPort};
-      app.listen(port, () => {
-        let build = require(BUILD_DIR);
-        console.log('✅ app ready: http://localhost:' + port);
-        if (process.env.NODE_ENV === 'development') {
-          broadcastDevReady(build);
-        }
-      });
-    `,
-
-    "postcss.config.js": js`
+let files = {
+  "postcss.config.cjs": js`
       module.exports = {
         plugins: {
           "postcss-import": {}, // Testing PostCSS cache invalidation
@@ -88,10 +22,10 @@ let fixture = (options: { appPort: number; devPort: number }): FixtureInit => ({
       };
     `,
 
-    "tailwind.config.js": js`
+  "tailwind.config.js": js`
       /** @type {import('tailwindcss').Config} */
-      module.exports = {
-        content: ["./app/**/*.{ts,tsx,jsx,js}"],
+      export default {
+        content: ["./app/**/{**,.client,.server}/**/*.{js,jsx,ts,tsx}"],
         theme: {
           extend: {},
         },
@@ -99,45 +33,45 @@ let fixture = (options: { appPort: number; devPort: number }): FixtureInit => ({
       };
     `,
 
-    "app/tailwind.css": css`
-      @tailwind base;
-      @tailwind components;
-      @tailwind utilities;
-    `,
+  "app/tailwind.css": css`
+    @tailwind base;
+    @tailwind components;
+    @tailwind utilities;
+  `,
 
-    "app/stylesWithImport.css": css`
-      @import "./importedStyle.css";
-    `,
+  "app/stylesWithImport.css": css`
+    @import "./importedStyle.css";
+  `,
 
-    "app/importedStyle.css": css`
-      .importedStyle {
-        font-weight: normal;
-      }
-    `,
+  "app/importedStyle.css": css`
+    .importedStyle {
+      font-weight: normal;
+    }
+  `,
 
-    "app/sideEffectStylesWithImport.css": css`
-      @import "./importedSideEffectStyle.css";
-    `,
+  "app/sideEffectStylesWithImport.css": css`
+    @import "./importedSideEffectStyle.css";
+  `,
 
-    "app/importedSideEffectStyle.css": css`
-      .importedSideEffectStyle {
-        font-size: initial;
-      }
-    `,
+  "app/importedSideEffectStyle.css": css`
+    .importedSideEffectStyle {
+      font-size: initial;
+    }
+  `,
 
-    "app/style.module.css": css`
-      .test {
-        composes: color from "./composedStyle.module.css";
-      }
-    `,
+  "app/style.module.css": css`
+    .test {
+      composes: color from "./composedStyle.module.css";
+    }
+  `,
 
-    "app/composedStyle.module.css": css`
-      .color {
-        color: initial;
-      }
-    `,
+  "app/composedStyle.module.css": css`
+    .color {
+      color: initial;
+    }
+  `,
 
-    "app/root.tsx": js`
+  "app/root.tsx": js`
       import type { LinksFunction } from "@remix-run/node";
       import { Link, Links, LiveReload, Meta, Outlet, Scripts } from "@remix-run/react";
       import { cssBundleHref } from "@remix-run/css-bundle";
@@ -187,7 +121,7 @@ let fixture = (options: { appPort: number; devPort: number }): FixtureInit => ({
       }
     `,
 
-    "app/routes/_index.tsx": js`
+  "app/routes/_index.tsx": js`
       import { useLoaderData } from "@remix-run/react";
       export function shouldRevalidate(args) {
         return true;
@@ -202,7 +136,7 @@ let fixture = (options: { appPort: number; devPort: number }): FixtureInit => ({
       }
     `,
 
-    "app/routes/about.tsx": js`
+  "app/routes/about.tsx": js`
       import Counter from "../components/counter";
       export default function About() {
         return (
@@ -213,7 +147,7 @@ let fixture = (options: { appPort: number; devPort: number }): FixtureInit => ({
         )
       }
     `,
-    "app/routes/mdx.mdx": `import { useLoaderData } from '@remix-run/react'
+  "app/routes/mdx.mdx": `import { useLoaderData } from '@remix-run/react'
 export const loader = () => "crazy"
 export const Component = () => {
   const data = useLoaderData()
@@ -225,7 +159,7 @@ whatsup
 
 <Component/>
 `,
-    "app/components/counter.tsx": js`
+  "app/components/counter.tsx": js`
       import * as React from "react";
       export default function Counter({ id }) {
         let [count, setCount] = React.useState(0);
@@ -236,50 +170,91 @@ whatsup
         );
       }
     `,
-  },
+};
+
+let customServer = (options: { appPort: number; devReady: string }) => {
+  return js`
+      import path from "node:path";
+      import url from "node:url";
+      import express from "express";
+      import { createRequestHandler } from "@remix-run/express";
+      import { ${options.devReady}, installGlobals } from "@remix-run/node";
+
+      installGlobals({ nativeFetch: true });
+
+      const app = express();
+      app.use(express.static("public", { immutable: true, maxAge: "1y" }));
+
+      const BUILD_PATH = url.pathToFileURL(path.join(process.cwd(), "build", "index.js"));
+
+      app.all(
+        "*",
+        createRequestHandler({
+          build: await import(BUILD_PATH),
+          mode: process.env.NODE_ENV,
+        })
+      );
+
+      let port = ${options.appPort};
+      app.listen(port, async () => {
+        let build = await import(BUILD_PATH);
+        console.log('✅ app ready: http://localhost:' + port);
+        if (process.env.NODE_ENV === 'development') {
+          ${options.devReady}(build);
+        }
+      });
+  `;
+};
+
+let HMR_TIMEOUT_MS = 30_000;
+
+let remix = "node ./node_modules/@remix-run/dev/dist/cli.js";
+let serve = "node ./node_modules/@remix-run/serve/dist/cli.js";
+
+test("HMR for remix-serve", async ({ page }) => {
+  await dev(page, (appPort) => ({
+    files,
+    devScript: `PORT=${appPort} ${remix} dev --manual -c "${serve} ./build/index.js"`,
+    appReadyPattern: /\[remix-serve\] /,
+  }));
 });
 
-let sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+test("HMR for custom server with broadcast", async ({ page }) => {
+  await dev(page, (appPort) => ({
+    files: {
+      ...files,
+      "server.js": customServer({
+        appPort,
+        devReady: "broadcastDevReady",
+      }),
+    },
+    devScript: `${remix} dev -c "node ./server.js"`,
+    appReadyPattern: /✅ app ready: /,
+  }));
+});
 
-let wait = async (
-  callback: () => boolean,
-  { timeoutMs = 1000, intervalMs = 250 } = {}
-) => {
-  let start = Date.now();
-  while (Date.now() - start <= timeoutMs) {
-    if (callback()) {
-      return;
-    }
-    await sleep(intervalMs);
+test("HMR for custom server with log", async ({ page }) => {
+  await dev(page, (appPort) => ({
+    files: {
+      ...files,
+      "server.js": customServer({
+        appPort,
+        devReady: "logDevReady",
+      }),
+    },
+    devScript: `${remix} dev -c "node ./server.js"`,
+    appReadyPattern: /✅ app ready: /,
+  }));
+});
+
+async function dev(
+  page: Page,
+  getOptions: (appPort: number) => {
+    files: Record<string, string>;
+    devScript: string;
+    appReadyPattern: RegExp;
   }
-  throw Error(`wait: timeout ${timeoutMs}ms`);
-};
-
-let bufferize = (stream: Readable): (() => string) => {
-  let buffer = "";
-  stream.on("data", (data) => (buffer += data.toString()));
-  return () => buffer;
-};
-
-let logConsoleError = (error: Error) => {
-  console.error(`[console] ${error.name}: ${error.message}`);
-};
-
-let expectConsoleError = (
-  isExpected: (error: Error) => boolean,
-  unexpected = logConsoleError
-) => {
-  return (error: Error) => {
-    if (isExpected(error)) {
-      return;
-    }
-    unexpected(error);
-  };
-};
-
-let HMR_TIMEOUT_MS = 10_000;
-
-test("HMR", async ({ page, browserName }) => {
+) {
   // uncomment for debugging
   // page.on("console", (msg) => console.log(msg.text()));
   page.on("pageerror", logConsoleError);
@@ -291,24 +266,44 @@ test("HMR", async ({ page, browserName }) => {
     }
   });
 
-  let portRange = makeRange(3080, 3099);
-  let appPort = await getPort({ port: portRange });
-  let devPort = await getPort({ port: portRange });
-  let projectDir = await createFixtureProject(fixture({ appPort, devPort }));
+  let appPort = await getPort();
+  let devPort = await getPort();
 
-  // spin up dev server
-  let dev = execa("npm", ["run", "dev"], { cwd: projectDir });
-  let devStdout = bufferize(dev.stdout!);
-  let devStderr = bufferize(dev.stderr!);
+  let options = getOptions(appPort);
+
+  let fixture: FixtureInit = {
+    config: {
+      dev: {
+        port: devPort,
+      },
+    },
+    files: options.files,
+  };
+
+  let projectDir = await createFixtureProject(fixture);
+
+  // inject dev script
+  let pkgJson = JSON.parse(
+    fs.readFileSync(path.join(projectDir, "package.json"), "utf8")
+  );
+  pkgJson.scripts.dev = options.devScript;
+  fs.writeFileSync(
+    path.join(projectDir, "package.json"),
+    JSON.stringify(pkgJson, null, 2)
+  );
+
+  let devProc = execa("pnpm", ["run", "dev"], { cwd: projectDir });
+  let devStdout = bufferize(devProc.stdout!);
+  let devStderr = bufferize(devProc.stderr!);
+
   try {
     await wait(
       () => {
-        if (dev.exitCode) throw Error("Dev server exited early");
-        return /✅ app ready: /.test(devStdout());
+        if (devProc.exitCode) throw Error("Dev server exited early");
+        return options.appReadyPattern.test(devStdout());
       },
       { timeoutMs: HMR_TIMEOUT_MS }
     );
-
     await page.goto(`http://localhost:${appPort}`, {
       waitUntil: "networkidle",
     });
@@ -368,7 +363,7 @@ test("HMR", async ({ page, browserName }) => {
     `;
     fs.writeFileSync(importedStylePath, newImportedStyle);
 
-    // // make changes to imported side-effect styles
+    // // make changes to imported side effect styles
     let newImportedSideEffectStyle = `
       .importedSideEffectStyle {
         font-size: 32px;
@@ -585,7 +580,7 @@ whatsup
     // let expectedErrorCount = 0;
     let expectDestructureTypeError = expectConsoleError((error) => {
       let expectedMessage = new Set([
-        // chrome, edge
+        // chrome, msedge
         "Cannot destructure property 'hello' of 'useLoaderData(...)' as it is null.",
         // firefox
         "(intermediate value)() is null",
@@ -631,6 +626,44 @@ whatsup
     console.log("stderr end -------------------------");
     throw e;
   } finally {
-    dev.kill();
+    devProc.pid && (await killtree(devProc.pid));
   }
-});
+}
+
+let sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+let wait = async (
+  callback: () => boolean,
+  { timeoutMs = 1000, intervalMs = 250 } = {}
+) => {
+  let start = Date.now();
+  while (Date.now() - start <= timeoutMs) {
+    if (callback()) {
+      return;
+    }
+    await sleep(intervalMs);
+  }
+  throw Error(`wait: timeout ${timeoutMs}ms`);
+};
+
+let bufferize = (stream: Readable): (() => string) => {
+  let buffer = "";
+  stream.on("data", (data) => (buffer += data.toString()));
+  return () => buffer;
+};
+
+let logConsoleError = (error: Error) => {
+  console.error(`[console] ${error.name}: ${error.message}`);
+};
+
+let expectConsoleError = (
+  isExpected: (error: Error) => boolean,
+  unexpected = logConsoleError
+) => {
+  return (error: Error) => {
+    if (isExpected(error)) {
+      return;
+    }
+    unexpected(error);
+  };
+};

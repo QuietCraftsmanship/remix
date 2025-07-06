@@ -1,11 +1,11 @@
-import express from "express";
-import supertest from "supertest";
-import { createRequest, createResponse } from "node-mocks-http";
-import {
-  createRequestHandler as createRemixRequestHandler,
-  Response as NodeResponse,
-} from "@remix-run/node";
 import { Readable } from "node:stream";
+import {
+  createReadableStreamFromReadable,
+  createRequestHandler as createRemixRequestHandler,
+} from "@remix-run/node";
+import express from "express";
+import { createRequest, createResponse } from "node-mocks-http";
+import supertest from "supertest";
 
 import {
   createRemixHeaders,
@@ -35,7 +35,7 @@ function createApp() {
     // We don't have a real app to test, but it doesn't matter. We won't ever
     // call through to the real createRequestHandler
     // @ts-expect-error
-    createRequestHandler({ build: undefined })
+    createRequestHandler({ build: {} })
   );
 
   return app;
@@ -102,8 +102,9 @@ describe("express createRequestHandler", () => {
     // https://github.com/node-fetch/node-fetch/blob/4ae35388b078bddda238277142bf091898ce6fda/test/response.js#L142-L148
     it("handles body as stream", async () => {
       mockedCreateRequestHandler.mockImplementation(() => async () => {
-        let stream = Readable.from("hello world");
-        return new NodeResponse(stream, { status: 200 }) as unknown as Response;
+        let readable = Readable.from("hello world");
+        let stream = createReadableStreamFromReadable(readable);
+        return new Response(stream, { status: 200 });
       });
 
       let request = supertest(createApp());
@@ -158,7 +159,7 @@ describe("express createRemixHeaders", () => {
   describe("creates fetch headers from express headers", () => {
     it("handles empty headers", () => {
       let headers = createRemixHeaders({});
-      expect(headers.raw()).toMatchInlineSnapshot(`Object {}`);
+      expect(Object.fromEntries(headers.entries())).toMatchInlineSnapshot(`{}`);
     });
 
     it("handles simple headers", () => {
@@ -177,7 +178,7 @@ describe("express createRemixHeaders", () => {
         "x-foo": ["bar", "baz"],
         "x-bar": "baz",
       });
-      expect(headers.getAll("x-foo")).toEqual(["bar", "baz"]);
+      expect(headers.get("x-foo")).toEqual("bar, baz");
       expect(headers.get("x-bar")).toBe("baz");
     });
 
@@ -188,7 +189,7 @@ describe("express createRemixHeaders", () => {
           "__other=some_other_value; Path=/; Secure; HttpOnly; Expires=Wed, 21 Oct 2015 07:28:00 GMT; SameSite=Lax",
         ],
       });
-      expect(headers.getAll("set-cookie")).toEqual([
+      expect(headers.getSetCookie()).toEqual([
         "__session=some_value; Path=/; Secure; HttpOnly; MaxAge=7200; SameSite=Lax",
         "__other=some_other_value; Path=/; Secure; HttpOnly; Expires=Wed, 21 Oct 2015 07:28:00 GMT; SameSite=Lax",
       ]);
@@ -217,5 +218,29 @@ describe("express createRemixRequest", () => {
       "max-age=300, s-maxage=3600"
     );
     expect(remixRequest.headers.get("host")).toBe("localhost:3000");
+  });
+
+  it("validates parsed port", async () => {
+    let expressRequest = createRequest({
+      url: "/foo/bar",
+      method: "GET",
+      protocol: "http",
+      hostname: "localhost",
+      headers: {
+        "Cache-Control": "max-age=300, s-maxage=3600",
+        Host: "localhost:3000",
+        "x-forwarded-host": ":/spoofed",
+      },
+    });
+    let expressResponse = createResponse();
+
+    let remixRequest = createRemixRequest(expressRequest, expressResponse);
+
+    expect(remixRequest.method).toBe("GET");
+    expect(remixRequest.headers.get("cache-control")).toBe(
+      "max-age=300, s-maxage=3600"
+    );
+    expect(remixRequest.headers.get("host")).toBe("localhost:3000");
+    expect(remixRequest.url).toBe("http://localhost:3000/foo/bar");
   });
 });

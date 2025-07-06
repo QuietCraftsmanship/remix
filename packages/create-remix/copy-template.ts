@@ -1,11 +1,10 @@
 import process from "node:process";
 import url from "node:url";
 import fs from "node:fs";
-import fse from "fs-extra";
 import path from "node:path";
 import stream from "node:stream";
 import { promisify } from "node:util";
-import fetch from "node-fetch";
+import { fetch } from "@remix-run/web-fetch";
 import gunzip from "gunzip-maybe";
 import tar from "tar-fs";
 import { ProxyAgent } from "proxy-agent";
@@ -23,15 +22,15 @@ export async function copyTemplate(
   template: string,
   destPath: string,
   options: CopyTemplateOptions
-) {
+): Promise<{ localTemplateDirectory: string } | undefined> {
   let { log = () => {} } = options;
 
   /**
    * Valid templates are:
    * - local file or directory on disk
-   * - github owner/repo shorthand
-   * - github owner/repo/directory shorthand
-   * - full github repo URL
+   * - GitHub owner/repo shorthand
+   * - GitHub owner/repo/directory shorthand
+   * - full GitHub repo URL
    * - any tarball URL
    */
 
@@ -41,8 +40,8 @@ export async function copyTemplate(
       let filepath = template.startsWith("file://")
         ? url.fileURLToPath(template)
         : template;
-      await copyTemplateFromLocalFilePath(filepath, destPath);
-      return;
+      let isLocalDir = await copyTemplateFromLocalFilePath(filepath, destPath);
+      return isLocalDir ? { localTemplateDirectory: filepath } : undefined;
     }
 
     if (isGithubRepoShorthand(template)) {
@@ -135,14 +134,16 @@ async function copyTemplateFromGenericUrl(
 async function copyTemplateFromLocalFilePath(
   filePath: string,
   destPath: string
-) {
-  if (filePath.endsWith(".tar.gz")) {
+): Promise<boolean> {
+  if (filePath.endsWith(".tar.gz") || filePath.endsWith(".tgz")) {
     await extractLocalTarball(filePath, destPath);
-    return;
+    return false;
   }
   if (fs.statSync(filePath).isDirectory()) {
-    await fse.copy(filePath, destPath);
-    return;
+    // If our template is just a directory on disk, return true here, and we'll
+    // just copy directly from there instead of "extracting" to a temp
+    // directory first
+    return true;
   }
   throw new CopyTemplateError(
     "The provided template is not a valid local directory or tarball."
@@ -223,7 +224,7 @@ async function downloadAndExtractTarball(
     headers.Authorization = `token ${token}`;
   }
   if (isGithubReleaseAssetUrl(tarballUrl)) {
-    // We can download the asset via the github api, but first we need to look
+    // We can download the asset via the GitHub api, but first we need to look
     // up the asset id
     let info = getGithubReleaseAssetInfo(tarballUrl);
     headers.Accept = "application/vnd.github.v3+json";
@@ -296,7 +297,7 @@ async function downloadAndExtractTarball(
     );
   }
 
-  // file paths returned from github are always unix style
+  // file paths returned from GitHub are always unix style
   if (filePath) {
     filePath = filePath.split(path.sep).join(path.posix.sep);
   }
@@ -304,15 +305,27 @@ async function downloadAndExtractTarball(
   let filePathHasFiles = false;
 
   try {
+    let input = new stream.PassThrough();
+    // Start reading stream into passthrough, don't await to avoid buffering
+    writeReadableStreamToWritable(response.body, input);
     await pipeline(
-      response.body.pipe(gunzip()),
+      input,
+      gunzip(),
       tar.extract(downloadPath, {
         map(header) {
           let originalDirName = header.name.split("/")[0];
           header.name = header.name.replace(`${originalDirName}/`, "");
 
           if (filePath) {
-            if (header.name.startsWith(filePath)) {
+            // Include trailing slash on startsWith when filePath doesn't include
+            // it so something like `templates/remix` doesn't inadvertently
+            // include `templates/remix-javascript/*` files
+            if (
+              (filePath.endsWith(path.posix.sep) &&
+                header.name.startsWith(filePath)) ||
+              (!filePath.endsWith(path.posix.sep) &&
+                header.name.startsWith(filePath + path.posix.sep))
+            ) {
               filePathHasFiles = true;
               header.name = header.name.replace(filePath, "");
             } else {
@@ -347,6 +360,34 @@ async function downloadAndExtractTarball(
   }
 }
 
+// Copied from remix-node/stream.ts
+async function writeReadableStreamToWritable(
+  stream: ReadableStream,
+  writable: stream.Writable
+) {
+  let reader = stream.getReader();
+  let flushable = writable as { flush?: Function };
+
+  try {
+    while (true) {
+      let { done, value } = await reader.read();
+
+      if (done) {
+        writable.end();
+        break;
+      }
+
+      writable.write(value);
+      if (typeof flushable.flush === "function") {
+        flushable.flush();
+      }
+    }
+  } catch (error: unknown) {
+    writable.destroy(error as Error);
+    throw error;
+  }
+}
+
 function isValidGithubRepoUrl(
   input: string | URL
 ): input is URL | GithubUrlString {
@@ -375,10 +416,14 @@ function isValidGithubRepoUrl(
 }
 
 function isGithubRepoShorthand(value: string) {
+  if (isUrl(value)) {
+    return false;
+  }
   // This supports :owner/:repo and :owner/:repo/nested/path, e.g.
   // remix-run/remix
   // remix-run/remix/templates/express
-  return /^[\w-]+\/[\w-]+(\/[\w-]+)*$/.test(value);
+  // remix-run/examples/socket.io
+  return /^[\w-]+\/[\w-.]+(\/[\w-.]+)*$/.test(value);
 }
 
 function isGithubReleaseAssetUrl(url: string) {
@@ -406,7 +451,7 @@ function getGithubReleaseAssetInfo(browserUrl: string): ReleaseAssetInfo {
   let [, owner, name, , downloadOrLatest, tag, asset] = url.pathname.split("/");
 
   if (downloadOrLatest === "latest" && tag === "download") {
-    // handle the Github URL quirk for latest releases
+    // handle the GitHub URL quirk for latest releases
     tag = "latest";
   }
 

@@ -5,9 +5,13 @@
   "scripts": {
     "build": "remix build",
     "dev": "remix dev",
-    "start": "remix-serve build"
+    "start": "remix-serve build/index.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@remix-run/react": "*",
+    "not-remix": "*",
+    "remix": "*"
+  },
   "devDependencies": {},
   "engines": {
     "node": ">=18.0.0"

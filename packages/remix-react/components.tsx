@@ -7,49 +7,57 @@ import * as React from "react";
 import type {
   AgnosticDataRouteMatch,
   UNSAFE_DeferredData as DeferredData,
+  RouterState,
   TrackedPromise,
+  UIMatch as UIMatchRR,
 } from "@remix-run/router";
-import type { LinkProps, NavLinkProps, Params } from "react-router-dom";
+import type {
+  FetcherWithComponents,
+  FormProps,
+  LinkProps,
+  NavLinkProps,
+} from "react-router-dom";
 import {
   Await as AwaitRR,
+  Form as RouterForm,
   Link as RouterLink,
   NavLink as RouterNavLink,
-  Outlet,
   UNSAFE_DataRouterContext as DataRouterContext,
   UNSAFE_DataRouterStateContext as DataRouterStateContext,
   matchRoutes,
   useAsyncError,
   useActionData as useActionDataRR,
+  useFetcher as useFetcherRR,
   useLoaderData as useLoaderDataRR,
-  useRouteLoaderData as useRouteLoaderDataRR,
   useMatches as useMatchesRR,
+  useRouteLoaderData as useRouteLoaderDataRR,
   useLocation,
-  useNavigation,
   useHref,
-  useRouteError,
 } from "react-router-dom";
 import type { SerializeFrom } from "@remix-run/server-runtime";
 
 import type { AppData } from "./data";
 import type { RemixContextObject } from "./entry";
-import { RemixRootDefaultErrorBoundary } from "./errorBoundaries";
 import invariant from "./invariant";
 import {
   getDataLinkHrefs,
-  getLinksForMatches,
+  getKeyedLinksForMatches,
+  getKeyedPrefetchLinks,
   getModuleLinkHrefs,
   getNewMatchesForLinks,
-  getStylesheetPrefetchLinks,
   isPageLinkDescriptor,
 } from "./links";
-import type { HtmlLinkDescriptor, PrefetchPageDescriptor } from "./links";
+import type { KeyedHtmlLinkDescriptor, PrefetchPageDescriptor } from "./links";
 import { createHtml, escapeHtml } from "./markup";
 import type {
   MetaFunction,
   MetaDescriptor,
   MetaMatch,
   MetaMatches,
+  RouteHandle,
 } from "./routeModules";
+import { singleFetchUrl } from "./single-fetch";
+import { getPartialManifest, isFogOfWarEnabled } from "./fog-of-war";
 
 function useDataRouterContext() {
   let context = React.useContext(DataRouterContext);
@@ -77,78 +85,40 @@ export const RemixContext = React.createContext<RemixContextObject | undefined>(
 );
 RemixContext.displayName = "Remix";
 
-function useRemixContext(): RemixContextObject {
+export function useRemixContext(): RemixContextObject {
   let context = React.useContext(RemixContext);
   invariant(context, "You must render this element inside a <Remix> element");
   return context;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// RemixRoute
-
-export function RemixRoute({ id }: { id: string }) {
-  let { routeModules } = useRemixContext();
-
-  invariant(
-    routeModules,
-    "Cannot initialize 'routeModules'. This normally occurs when you have server code in your client modules.\n" +
-      "Check this link for more details:\nhttps://remix.run/pages/gotchas#server-code-in-client-bundles"
-  );
-
-  let { default: Component, ErrorBoundary } = routeModules[id];
-
-  // Default Component to Outlet if we expose boundary UI components
-  if (!Component && ErrorBoundary) {
-    Component = Outlet;
-  }
-
-  invariant(
-    Component,
-    `Route "${id}" has no component! Please go add a \`default\` export in the route module file.\n` +
-      "If you were trying to navigate or submit to a resource route, use `<a>` instead of `<Link>` or `<Form reloadDocument>`."
-  );
-
-  return <Component />;
-}
-
-export function RemixRouteError({ id }: { id: string }) {
-  let { routeModules } = useRemixContext();
-
-  // This checks prevent cryptic error messages such as: 'Cannot read properties of undefined (reading 'root')'
-  invariant(
-    routeModules,
-    "Cannot initialize 'routeModules'. This normally occurs when you have server code in your client modules.\n" +
-      "Check this link for more details:\nhttps://remix.run/pages/gotchas#server-code-in-client-bundles"
-  );
-
-  let error = useRouteError();
-  let { ErrorBoundary } = routeModules[id];
-
-  if (ErrorBoundary) {
-    return <ErrorBoundary />;
-  } else if (id === "root") {
-    return <RemixRootDefaultErrorBoundary error={error} />;
-  }
-
-  throw error;
-}
-////////////////////////////////////////////////////////////////////////////////
 // Public API
+
+/**
+ * Defines the discovery behavior of the link:
+ *
+ * - "render": Eagerly discover when the link is rendered (default)
+ * - "none": No eager discovery - discover when the link is clicked
+ */
+export type DiscoverBehavior = "render" | "none";
 
 /**
  * Defines the prefetching behavior of the link:
  *
+ * - "none": Never fetched
  * - "intent": Fetched when the user focuses or hovers the link
  * - "render": Fetched when the link is rendered
- * - "none": Never fetched
+ * - "viewport": Fetched when the link is in the viewport
  */
 type PrefetchBehavior = "intent" | "render" | "none" | "viewport";
 
 export interface RemixLinkProps extends LinkProps {
+  discover?: DiscoverBehavior;
   prefetch?: PrefetchBehavior;
 }
 
 export interface RemixNavLinkProps extends NavLinkProps {
+  discover?: DiscoverBehavior;
   prefetch?: PrefetchBehavior;
 }
 
@@ -230,13 +200,23 @@ function usePrefetchBehavior<T extends HTMLAnchorElement>(
 
 const ABSOLUTE_URL_REGEX = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 
+function getDiscoverAttr(
+  discover: DiscoverBehavior,
+  isAbsolute: boolean,
+  reloadDocument: boolean | undefined
+) {
+  return discover === "render" && !isAbsolute && !reloadDocument
+    ? "true"
+    : undefined;
+}
+
 /**
- * A special kind of `<Link>` that knows whether or not it is "active".
+ * A special kind of `<Link>` that knows whether it is "active".
  *
  * @see https://remix.run/components/nav-link
  */
 let NavLink = React.forwardRef<HTMLAnchorElement, RemixNavLinkProps>(
-  ({ to, prefetch = "none", ...props }, forwardedRef) => {
+  ({ to, prefetch = "none", discover = "render", ...props }, forwardedRef) => {
     let isAbsolute = typeof to === "string" && ABSOLUTE_URL_REGEX.test(to);
 
     let href = useHref(to);
@@ -252,6 +232,11 @@ let NavLink = React.forwardRef<HTMLAnchorElement, RemixNavLinkProps>(
           {...prefetchHandlers}
           ref={mergeRefs(forwardedRef, ref)}
           to={to}
+          data-discover={getDiscoverAttr(
+            discover,
+            isAbsolute,
+            props.reloadDocument
+          )}
         />
         {shouldPrefetch && !isAbsolute ? (
           <PrefetchPageLinks page={href} />
@@ -270,7 +255,7 @@ export { NavLink };
  * @see https://remix.run/components/link
  */
 let Link = React.forwardRef<HTMLAnchorElement, RemixLinkProps>(
-  ({ to, prefetch = "none", ...props }, forwardedRef) => {
+  ({ to, prefetch = "none", discover = "render", ...props }, forwardedRef) => {
     let isAbsolute = typeof to === "string" && ABSOLUTE_URL_REGEX.test(to);
 
     let href = useHref(to);
@@ -286,6 +271,11 @@ let Link = React.forwardRef<HTMLAnchorElement, RemixLinkProps>(
           {...prefetchHandlers}
           ref={mergeRefs(forwardedRef, ref)}
           to={to}
+          data-discover={getDiscoverAttr(
+            discover,
+            isAbsolute,
+            props.reloadDocument
+          )}
         />
         {shouldPrefetch && !isAbsolute ? (
           <PrefetchPageLinks page={href} />
@@ -296,6 +286,36 @@ let Link = React.forwardRef<HTMLAnchorElement, RemixLinkProps>(
 );
 Link.displayName = "Link";
 export { Link };
+
+export interface RemixFormProps extends FormProps {
+  discover?: DiscoverBehavior;
+}
+
+/**
+ * This component renders a form tag and is the primary way the user will
+ * submit information via your website.
+ *
+ * @see https://remix.run/components/form
+ */
+let Form = React.forwardRef<HTMLFormElement, RemixFormProps>(
+  ({ discover = "render", ...props }, forwardedRef) => {
+    let isAbsolute =
+      typeof props.action === "string" && ABSOLUTE_URL_REGEX.test(props.action);
+    return (
+      <RouterForm
+        {...props}
+        ref={forwardedRef}
+        data-discover={getDiscoverAttr(
+          discover,
+          isAbsolute,
+          props.reloadDocument
+        )}
+      />
+    );
+  }
+);
+Form.displayName = "Form";
+export { Form };
 
 export function composeEventHandlers<
   EventType extends React.SyntheticEvent | Event
@@ -311,70 +331,62 @@ export function composeEventHandlers<
   };
 }
 
+// Return the matches actively being displayed:
+// - In SPA Mode we only SSR/hydrate the root match, and include all matches
+//   after hydration. This lets the router handle initial match loads via lazy().
+// - When an error boundary is rendered, we slice off matches up to the
+//   boundary for <Links>/<Meta>
+function getActiveMatches(
+  matches: RouterState["matches"],
+  errors: RouterState["errors"],
+  isSpaMode: boolean
+) {
+  if (isSpaMode && !isHydrated) {
+    return [matches[0]];
+  }
+
+  if (errors) {
+    let errorIdx = matches.findIndex((m) => errors[m.route.id] !== undefined);
+    return matches.slice(0, errorIdx + 1);
+  }
+
+  return matches;
+}
+
 /**
  * Renders the `<link>` tags for the current routes.
  *
  * @see https://remix.run/components/links
  */
 export function Links() {
-  let { manifest, routeModules } = useRemixContext();
+  let { isSpaMode, manifest, routeModules, criticalCss } = useRemixContext();
   let { errors, matches: routerMatches } = useDataRouterStateContext();
 
-  let matches = errors
-    ? routerMatches.slice(
-        0,
-        routerMatches.findIndex((m) => errors![m.route.id]) + 1
-      )
-    : routerMatches;
+  let matches = getActiveMatches(routerMatches, errors, isSpaMode);
 
-  let links = React.useMemo(
-    () => getLinksForMatches(matches, routeModules, manifest),
+  let keyedLinks = React.useMemo(
+    () => getKeyedLinksForMatches(matches, routeModules, manifest),
     [matches, routeModules, manifest]
   );
 
   return (
     <>
-      {links.map((link) => {
-        if (isPageLinkDescriptor(link)) {
-          return <PrefetchPageLinks key={link.page} {...link} />;
-        }
-
-        let imageSrcSet: string | null = null;
-        let imageSizes: string | null = null;
-
-        // In React 17, <link imageSrcSet> and <link imageSizes> will warn
-        // because the DOM attributes aren't recognized, so users need to pass
-        // them in all lowercase to forward the attributes to the node without a
-        // warning. Normalize so that either property can be used in Remix.
-        let imageSizesKey = "useId" in React ? "imageSizes" : "imagesizes";
-        let imageSrcSetKey = "useId" in React ? "imageSrcSet" : "imagesrcset";
-        if (link.imageSrcSet) {
-          imageSrcSet = link.imageSrcSet;
-          delete link.imageSrcSet;
-        }
-
-        if (link.imageSizes) {
-          imageSizes = link.imageSizes;
-          delete link.imageSizes;
-        }
-
-        return (
-          <link
-            key={link.rel + (link.href || "") + (imageSrcSet || "")}
-            {...{
-              ...link,
-              [imageSizesKey]: imageSizes,
-              [imageSrcSetKey]: imageSrcSet,
-            }}
-          />
-        );
-      })}
+      {criticalCss ? (
+        <style dangerouslySetInnerHTML={{ __html: criticalCss }} />
+      ) : null}
+      {keyedLinks.map(({ key, link }) =>
+        isPageLinkDescriptor(link) ? (
+          <PrefetchPageLinks key={key} {...link} />
+        ) : (
+          <link key={key} {...link} />
+        )
+      )}
     </>
   );
 }
 
 /**
- * This component renders all of the `<link rel="prefetch">` and
+ * This component renders all the `<link rel="prefetch">` and
  * `<link rel="modulepreload"/>` tags for all the assets (data, modules, css) of
  * a given page.
  *
@@ -388,8 +400,8 @@ export function PrefetchPageLinks({
 }: PrefetchPageDescriptor) {
   let { router } = useDataRouterContext();
   let matches = React.useMemo(
-    () => matchRoutes(router.routes, page),
-    [router.routes, page]
+    () => matchRoutes(router.routes, page, router.basename),
+    [router.routes, page, router.basename]
   );
 
   if (!matches) {
@@ -402,17 +414,21 @@ export function PrefetchPageLinks({
   );
 }
 
-function usePrefetchedStylesheets(matches: AgnosticDataRouteMatch[]) {
+function useKeyedPrefetchLinks(matches: AgnosticDataRouteMatch[]) {
   let { manifest, routeModules } = useRemixContext();
 
-  let [styleLinks, setStyleLinks] = React.useState<HtmlLinkDescriptor[]>([]);
+  let [keyedPrefetchLinks, setKeyedPrefetchLinks] = React.useState<
+    KeyedHtmlLinkDescriptor[]
+  >([]);
 
   React.useEffect(() => {
     let interrupted: boolean = false;
 
-    getStylesheetPrefetchLinks(matches, manifest, routeModules).then(
+    void getKeyedPrefetchLinks(matches, manifest, routeModules).then(
       (links) => {
-        if (!interrupted) setStyleLinks(links);
+        if (!interrupted) {
+          setKeyedPrefetchLinks(links);
+        }
       }
     );
 
@@ -421,7 +437,7 @@ function usePrefetchedStylesheets(matches: AgnosticDataRouteMatch[]) {
     };
   }, [matches, manifest, routeModules]);
 
-  return styleLinks;
+  return keyedPrefetchLinks;
 }
 
 function PrefetchPageLinksImpl({
@@ -432,8 +448,8 @@ function PrefetchPageLinksImpl({
   matches: AgnosticDataRouteMatch[];
 }) {
   let location = useLocation();
-  let { manifest } = useRemixContext();
-  let { matches } = useDataRouterStateContext();
+  let { future, manifest, routeModules } = useRemixContext();
+  let { loaderData, matches } = useDataRouterStateContext();
 
   let newMatchesForData = React.useMemo(
     () =>
@@ -443,10 +459,74 @@ function PrefetchPageLinksImpl({
         matches,
         manifest,
         location,
+        future,
         "data"
       ),
-    [page, nextMatches, matches, manifest, location]
+    [page, nextMatches, matches, manifest, location, future]
   );
+
+  let dataHrefs = React.useMemo(() => {
+    if (!future.v3_singleFetch) {
+      return getDataLinkHrefs(page, newMatchesForData, manifest);
+    }
+
+    if (page === location.pathname + location.search + location.hash) {
+      // Because we opt-into revalidation, don't compute this for the current page
+      // since it would always trigger a prefetch of the existing loaders
+      return [];
+    }
+
+    // Single-fetch is harder :)
+    // This parallels the logic in the single fetch data strategy
+    let routesParams = new Set<string>();
+    let foundOptOutRoute = false;
+    nextMatches.forEach((m) => {
+      if (!manifest.routes[m.route.id].hasLoader) {
+        return;
+      }
+
+      if (
+        !newMatchesForData.some((m2) => m2.route.id === m.route.id) &&
+        m.route.id in loaderData &&
+        routeModules[m.route.id]?.shouldRevalidate
+      ) {
+        foundOptOutRoute = true;
+      } else if (manifest.routes[m.route.id].hasClientLoader) {
+        foundOptOutRoute = true;
+      } else {
+        routesParams.add(m.route.id);
+      }
+    });
+
+    if (routesParams.size === 0) {
+      return [];
+    }
+
+    let url = singleFetchUrl(page);
+    // When one or more routes have opted out, we add a _routes param to
+    // limit the loaders to those that have a server loader and did not
+    // opt out
+    if (foundOptOutRoute && routesParams.size > 0) {
+      url.searchParams.set(
+        "_routes",
+        nextMatches
+          .filter((m) => routesParams.has(m.route.id))
+          .map((m) => m.route.id)
+          .join(",")
+      );
+    }
+
+    return [url.pathname + url.search];
+  }, [
+    future.v3_singleFetch,
+    loaderData,
+    location,
+    manifest,
+    newMatchesForData,
+    nextMatches,
+    page,
+    routeModules,
+  ]);
 
   let newMatchesForAssets = React.useMemo(
     () =>
@@ -456,14 +536,10 @@ function PrefetchPageLinksImpl({
         matches,
         manifest,
         location,
+        future,
         "assets"
       ),
-    [page, nextMatches, matches, manifest, location]
-  );
-
-  let dataHrefs = React.useMemo(
-    () => getDataLinkHrefs(page, newMatchesForData, manifest),
-    [newMatchesForData, page, manifest]
+    [page, nextMatches, matches, manifest, location, future]
   );
 
   let moduleHrefs = React.useMemo(
@@ -473,7 +549,7 @@ function PrefetchPageLinksImpl({
 
   // needs to be a hook with async behavior because we need the modules, not
   // just the manifest like the other links in here.
-  let styleLinks = usePrefetchedStylesheets(newMatchesForAssets);
+  let keyedPrefetchLinks = useKeyedPrefetchLinks(newMatchesForAssets);
 
   return (
     <>
@@ -483,10 +559,10 @@ function PrefetchPageLinksImpl({
       {moduleHrefs.map((href) => (
         <link key={href} rel="modulepreload" href={href} {...linkProps} />
       ))}
-      {styleLinks.map((link) => (
+      {keyedPrefetchLinks.map(({ key, link }) => (
         // these don't spread `linkProps` because they are full link descriptors
         // already with their own props
-        <link key={link.href} {...link} />
+        <link key={key} {...link} />
       ))}
     </>
   );
@@ -498,7 +574,7 @@ function PrefetchPageLinksImpl({
  * @see https://remix.run/components/meta
  */
 export function Meta() {
-  let { routeModules } = useRemixContext();
+  let { isSpaMode, routeModules } = useRemixContext();
   let {
     errors,
     matches: routerMatches,
@@ -506,12 +582,12 @@ export function Meta() {
   } = useDataRouterStateContext();
   let location = useLocation();
 
-  let _matches = errors
-    ? routerMatches.slice(
-        0,
-        routerMatches.findIndex((m) => errors![m.route.id]) + 1
-      )
-    : routerMatches;
+  let _matches = getActiveMatches(routerMatches, errors, isSpaMode);
+
+  let error: any = null;
+  if (errors) {
+    error = errors[_matches[_matches.length - 1].route.id];
+  }
 
   let meta: MetaDescriptor[] = [];
   let leafMeta: MetaDescriptor[] | null = null;
@@ -531,6 +607,7 @@ export function Meta() {
       params: _match.params,
       pathname: _match.pathname,
       handle: _match.route.handle,
+      error,
     };
     matches[i] = match;
 
@@ -542,13 +619,14 @@ export function Meta() {
               params,
               location,
               matches,
+              error,
             })
           : Array.isArray(routeModule.meta)
           ? [...routeModule.meta]
           : routeModule.meta;
     } else if (leafMeta) {
       // We only assign the route's meta to the nearest leaf if there is no meta
-      // export in the route. The meta function may return a falsey value which
+      // export in the route. The meta function may return a falsy value which
       // is effectively the same as an empty array.
       routeMeta = [...leafMeta];
     }
@@ -578,8 +656,7 @@ export function Meta() {
         }
 
         if ("tagName" in metaProps) {
-          let tagName = metaProps.tagName;
-          delete metaProps.tagName;
+          let { tagName, ...rest } = metaProps;
           if (!isValidMetaTag(tagName)) {
             console.warn(
               `A meta object uses an invalid tagName: ${tagName}. Expected either 'link' or 'meta'`
@@ -587,7 +664,7 @@ export function Meta() {
             return null;
           }
           let Comp = tagName;
-          return <Comp key={JSON.stringify(metaProps)} {...metaProps} />;
+          return <Comp key={JSON.stringify(rest)} {...rest} />;
         }
 
         if ("title" in metaProps) {
@@ -668,11 +745,26 @@ export type ScriptProps = Omit<
  * @see https://remix.run/components/scripts
  */
 export function Scripts(props: ScriptProps) {
-  let { manifest, serverHandoffString, abortDelay, serializeError } =
-    useRemixContext();
+  let {
+    manifest,
+    serverHandoffString,
+    abortDelay,
+    serializeError,
+    isSpaMode,
+    future,
+    renderMeta,
+  } = useRemixContext();
   let { router, static: isStatic, staticContext } = useDataRouterContext();
-  let { matches } = useDataRouterStateContext();
-  let navigation = useNavigation();
+  let { matches: routerMatches } = useDataRouterStateContext();
+  let enableFogOfWar = isFogOfWarEnabled(future, isSpaMode);
+
+  // Let <RemixServer> know that we hydrated and we should render the single
+  // fetch streaming scripts
+  if (renderMeta) {
+    renderMeta.didRenderScripts = true;
+  }
+
+  let matches = getActiveMatches(routerMatches, null, isSpaMode);
 
   React.useEffect(() => {
     isHydrated = true;
@@ -732,11 +824,24 @@ export function Scripts(props: ScriptProps) {
 
   let deferredScripts: any[] = [];
   let initialScripts = React.useMemo(() => {
+    let streamScript = future.v3_singleFetch
+      ? // prettier-ignore
+        "window.__remixContext.stream = new ReadableStream({" +
+          "start(controller){" +
+            "window.__remixContext.streamController = controller;" +
+          "}" +
+        "}).pipeThrough(new TextEncoderStream());"
+      : "";
+
     let contextScript = staticContext
-      ? `window.__remixContext = ${serverHandoffString};`
+      ? `window.__remixContext = ${serverHandoffString};${streamScript}`
       : " ";
 
-    let activeDeferreds = staticContext?.activeDeferreds;
+    // When single fetch is enabled, deferred is handled by turbo-stream
+    let activeDeferreds = future.v3_singleFetch
+      ? undefined
+      : staticContext?.activeDeferreds;
+
     // This sets up the __remixContext with utility functions used by the
     // deferred scripts.
     // - __remixContext.p is a function that takes a resolved value or error and returns a promise.
@@ -745,7 +850,7 @@ export function Scripts(props: ScriptProps) {
     //   resolution by the subsequently streamed chunks.
     // - __remixContext.r is a function that takes a routeID, key and value or error and resolves
     //   the promise created by __remixContext.n.
-    // - __remixContext.t is a a map or routeId to keys to an object containing `e` and `r` methods
+    // - __remixContext.t is a map or routeId to keys to an object containing `e` and `r` methods
     //   to resolve or reject the promise created by __remixContext.n.
     // - __remixContext.a is the active number of deferred scripts that should be rendered to match
     //   the SSR tree for hydration on the client.
@@ -839,7 +944,7 @@ export function Scripts(props: ScriptProps) {
           manifest.hmr?.runtime
             ? `import ${JSON.stringify(manifest.hmr.runtime)};`
             : ""
-        }import ${JSON.stringify(manifest.url)};
+        }${enableFogOfWar ? "" : `import ${JSON.stringify(manifest.url)}`};
 ${matches
   .map(
     (match, index) =>
@@ -848,6 +953,16 @@ ${matches
       )};`
   )
   .join("\n")}
+${
+  enableFogOfWar
+    ? // Inline a minimal manifest with the SSR matches
+      `window.__remixManifest = ${JSON.stringify(
+        getPartialManifest(manifest, router),
+        null,
+        2
+      )};`
+    : ""
+}
 window.__remixRouteModules = {${matches
           .map(
             (match, index) => `${JSON.stringify(match.route.id)}:route${index}`
@@ -892,23 +1007,7 @@ import(${JSON.stringify(manifest.entry.module)});`;
     }
   }
 
-  // avoid waterfall when importing the next route module
-  let nextMatches = React.useMemo(() => {
-    if (navigation.location) {
-      // FIXME: can probably use transitionManager `nextMatches`
-      let matches = matchRoutes(router.routes, navigation.location);
-      invariant(
-        matches,
-        `No routes match path "${navigation.location.pathname}"`
-      );
-      return matches;
-    }
-
-    return [];
-  }, [navigation.location, router.routes]);
-
   let routePreloads = matches
-    .concat(nextMatches)
     .map((match) => {
       let route = manifest.routes[match.route.id];
       return (route.imports || []).concat([route.module]);
@@ -919,6 +1018,13 @@ import(${JSON.stringify(manifest.entry.module)});`;
 
   return isHydrated ? null : (
     <>
+      {!enableFogOfWar ? (
+        <link
+          rel="modulepreload"
+          href={manifest.url}
+          crossOrigin={props.crossOrigin}
+        />
+      ) : null}
       <link
         rel="modulepreload"
         href={manifest.entry.module}
@@ -1043,53 +1149,19 @@ function dedupe(array: any[]) {
   return [...new Set(array)];
 }
 
-// TODO: Can this be re-exported from RR?
-export interface RouteMatch {
-  /**
-   * The id of the matched route
-   */
-  id: string;
-  /**
-   * The pathname of the matched route
-   */
-  pathname: string;
-  /**
-   * The dynamic parameters of the matched route
-   *
-   * @see https://remix.run/file-conventions/routes-files#dynamic-route-parameters
-   */
-  params: Params<string>;
-  /**
-   * Any route data associated with the matched route
-   */
-  data: any;
-  /**
-   * The exported `handle` object of the matched route.
-   *
-   * @see https://remix.run/route/handle
-   */
-  handle: undefined | { [key: string]: any };
-}
+export type UIMatch<D = AppData, H = RouteHandle> = UIMatchRR<
+  SerializeFrom<D>,
+  H
+>;
 
-export function useMatches(): RouteMatch[] {
-  let { routeModules } = useRemixContext();
-  let matches = useMatchesRR();
-  return React.useMemo(
-    () =>
-      matches.map((match) => {
-        let remixMatch: RouteMatch = {
-          id: match.id,
-          pathname: match.pathname,
-          params: match.params,
-          data: match.data,
-          // Need to grab handle here since we don't have it at client-side route
-          // creation time
-          handle: routeModules[match.id].handle,
-        };
-        return remixMatch;
-      }),
-    [matches, routeModules]
-  );
+/**
+ * Returns the active route matches, useful for accessing loaderData for
+ * parent/child routes or the route "handle" property
+ *
+ * @see https://remix.run/hooks/use-matches
+ */
+export function useMatches(): UIMatch[] {
+  return useMatchesRR() as UIMatch[];
 }
 
 /**
@@ -1121,20 +1193,55 @@ export function useActionData<T = AppData>(): SerializeFrom<T> | undefined {
   return useActionDataRR() as SerializeFrom<T> | undefined;
 }
 
-// Dead Code Elimination magic for production builds.
-// This way devs don't have to worry about doing the NODE_ENV check themselves.
+/**
+ * Interacts with route loaders and actions without causing a navigation. Great
+ * for any interaction that stays on the same page.
+ *
+ * @see https://remix.run/hooks/use-fetcher
+ */
+export function useFetcher<TData = AppData>(
+  opts: Parameters<typeof useFetcherRR>[0] = {}
+): FetcherWithComponents<SerializeFrom<TData>> {
+  return useFetcherRR(opts);
+}
+
+/**
+ * This component connects your app to the Remix asset server and
+ * automatically reloads the page when files change in development.
+ * In production, it renders null, so you can safely render it always in your root route.
+ *
+ * @see https://remix.run/docs/components/live-reload
+ */
 export const LiveReload =
+  // Dead Code Elimination magic for production builds.
+  // This way devs don't have to worry about doing the NODE_ENV check themselves.
   process.env.NODE_ENV !== "development"
     ? () => null
     : function LiveReload({
+        origin,
         port,
         timeoutMs = 1000,
         nonce = undefined,
       }: {
+        origin?: string;
         port?: number;
         timeoutMs?: number;
         nonce?: string;
       }) {
+        // @ts-expect-error
+        let isViteClient = import.meta && import.meta.env !== undefined;
+        if (isViteClient) {
+          console.warn(
+            [
+              "`<LiveReload />` is obsolete when using Vite and can conflict with Vite's built-in HMR runtime.",
+              "",
+              "Remove `<LiveReload />` from your code and instead only use `<Scripts />`.",
+              "Then refresh the page to remove lingering scripts from `<LiveReload />`.",
+            ].join("\n")
+          );
+          return null;
+        }
+        origin ??= process.env.REMIX_DEV_ORIGIN;
         let js = String.raw;
         return (
           <script
@@ -1143,19 +1250,16 @@ export const LiveReload =
             dangerouslySetInnerHTML={{
               __html: js`
                 function remixLiveReloadConnect(config) {
-                  let REMIX_DEV_ORIGIN = ${JSON.stringify(
-                    process.env.REMIX_DEV_ORIGIN
-                  )};
+                  let LIVE_RELOAD_ORIGIN = ${JSON.stringify(origin)};
                   let protocol =
-                    REMIX_DEV_ORIGIN ? new URL(REMIX_DEV_ORIGIN).protocol.replace(/^http/, "ws") :
+                    LIVE_RELOAD_ORIGIN ? new URL(LIVE_RELOAD_ORIGIN).protocol.replace(/^http/, "ws") :
                     location.protocol === "https:" ? "wss:" : "ws:"; // remove in v2?
-                  let hostname = REMIX_DEV_ORIGIN ? new URL(REMIX_DEV_ORIGIN).hostname : location.hostname;
+                  let hostname = LIVE_RELOAD_ORIGIN ? new URL(LIVE_RELOAD_ORIGIN).hostname : location.hostname;
                   let url = new URL(protocol + "//" + hostname + "/socket");
 
                   url.port =
                     ${port} ||
-                    REMIX_DEV_ORIGIN ? new URL(REMIX_DEV_ORIGIN).port :
-                    8002;
+                    (LIVE_RELOAD_ORIGIN ? new URL(LIVE_RELOAD_ORIGIN).port : 8002);
 
                   let ws = new WebSocket(url.href);
                   ws.onmessage = async (message) => {

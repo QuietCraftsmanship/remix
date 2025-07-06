@@ -2,6 +2,9 @@ import path from "node:path";
 import fse from "fs-extra";
 import chalk from "chalk";
 
+const args = process.argv.slice(2);
+const tsc = process.env.CI || args.includes("--tsc");
+
 const ROOT_DIR = process.cwd();
 const PACKAGES_PATH = path.join(ROOT_DIR, "packages");
 const DEFAULT_BUILD_PATH = path.join(ROOT_DIR, "build");
@@ -33,7 +36,11 @@ async function copyBuildToDist() {
       build: buildDir,
       src: path.join(
         PACKAGES_PATH,
-        parentDir === "@remix-run" ? `remix-${dirName}` : dirName
+        parentDir === "@remix-run"
+          ? `remix-${dirName}`
+          : parentDir === "@vercel"
+          ? `vercel-${dirName}`
+          : dirName
       ),
     };
   });
@@ -87,22 +94,39 @@ async function copyBuildToDist() {
       "build/node_modules/@remix-run/dev/server-build.js",
       "packages/remix-dev/server-build.js",
     ],
-    // server-build.d.ts only built by tsc to dist/.  Copy outside of dist/
-    // both in build/ and packages/ dir
-    [
-      "build/node_modules/@remix-run/dev/dist/server-build.d.ts",
-      "build/node_modules/@remix-run/dev/server-build.d.ts",
-    ],
-    [
-      "build/node_modules/@remix-run/dev/dist/server-build.d.ts",
-      "packages/remix-dev/server-build.d.ts",
-    ],
-    // globals.d.ts shim written outside of dist/ in above, copy to packages/
-    // dir outside of dist/
-    [
-      "build/node_modules/@remix-run/node/globals.d.ts",
-      "packages/remix-node/globals.d.ts",
-    ],
+    ...(tsc
+      ? [
+          [
+            "build/node_modules/@remix-run/dev/dist/server-build.d.ts",
+            "build/node_modules/@remix-run/dev/server-build.d.ts",
+          ],
+          [
+            "build/node_modules/@remix-run/dev/dist/server-build.d.ts",
+            "packages/remix-dev/server-build.d.ts",
+          ],
+          // globals.d.ts shim written outside of dist/ in above, copy to packages/
+          // dir outside of dist/
+          [
+            "build/node_modules/@remix-run/node/globals.d.ts",
+            "packages/remix-node/globals.d.ts",
+          ],
+        ]
+      : []),
+
+    // `@vercel/remix` stuffs. We want "server" to be placed at the root of the package.
+    ...[
+      "globals.js",
+      "globals.d.ts",
+      "server.js",
+      "server.d.ts",
+      "vite.js",
+      "vite.d.ts",
+    ].map((name) => {
+      return [
+        `build/node_modules/@vercel/remix/dist/${name}`,
+        `packages/vercel-remix/${name}`,
+      ];
+    }),
   ];
 
   oneOffCopies.forEach(([srcFile, destFile]) =>
@@ -117,6 +141,23 @@ async function copyBuildToDist() {
   );
 
   await Promise.all(copyQueue);
+
+  // For the Vercel Remix Vite preset, the `Preset` type import needs to
+  // be adjusted, since in this monorepo it's written against the source,
+  // but consumers of the package will import for the `dist` compiled types.
+  let vercelRemixViteTypesPath = "packages/vercel-remix/vite.d.ts";
+  let vercelRemixViteTypesData = await fse.readFile(
+    vercelRemixViteTypesPath,
+    "utf8"
+  );
+  await fse.writeFile(
+    vercelRemixViteTypesPath,
+    vercelRemixViteTypesData.replace(
+      "@remix-run/dev/vite/plugin",
+      "@remix-run/dev/dist/vite/plugin"
+    )
+  );
+
   console.log(
     chalk.green(
       "  ✅ Successfully copied build files to package dist directories!"
@@ -138,10 +179,14 @@ async function getPackageBuildPaths(moduleRootDir) {
       if (!(await fse.stat(moduleDir)).isDirectory()) {
         continue;
       }
-      if (path.basename(moduleDir) === "@remix-run") {
+      if (
+        path.basename(moduleDir) === "@remix-run" ||
+        path.basename(moduleDir) === "@vercel"
+      ) {
         packageBuilds.push(...(await getPackageBuildPaths(moduleDir)));
       } else if (
         /node_modules[/\\]@remix-run[/\\]/.test(moduleDir) ||
+        /node_modules[/\\]@vercel[/\\]/.test(moduleDir) ||
         /node_modules[/\\]create-remix/.test(moduleDir) ||
         /node_modules[/\\]remix/.test(moduleDir)
       ) {
@@ -151,7 +196,7 @@ async function getPackageBuildPaths(moduleRootDir) {
     return packageBuilds;
   } catch (_) {
     console.error(
-      "No build files found. Run `yarn build` before running this script."
+      "No build files found. Run `pnpm build` before running this script."
     );
     process.exit(1);
   }

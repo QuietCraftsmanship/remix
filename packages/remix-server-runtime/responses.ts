@@ -2,6 +2,8 @@ import {
   defer as routerDefer,
   json as routerJson,
   redirect as routerRedirect,
+  replace as routerReplace,
+  redirectDocument as routerRedirectDocument,
   type UNSAFE_DeferredData as DeferredData,
   type TrackedPromise,
 } from "@remix-run/router";
@@ -39,6 +41,16 @@ export type TypedResponse<T = unknown> = Omit<Response, "json"> & {
  * This is a shortcut for creating `application/json` responses. Converts `data`
  * to JSON and sets the `Content-Type` header.
  *
+ * @deprecated This utility is deprecated in favor of opting into Single Fetch
+ * via `future.v3_singleFetch` and returning raw objects.  This method will be
+ * removed in React Router v7.
+ *
+ * If you need to return custom headers or status code, you can use the new `data`
+ * utility (https://remix.run/docs/en/main/utils/data).
+ *
+ * If you need to return a JSON Response from a resource route, you can use
+ * `Response.json` (https://developer.mozilla.org/en-US/docs/Web/API/Response/json_static).
+ *
  * @see https://remix.run/utils/json
  */
 export const json: JsonFunction = (data, init = {}) => {
@@ -47,6 +59,10 @@ export const json: JsonFunction = (data, init = {}) => {
 
 /**
  * This is a shortcut for creating Remix deferred responses
+ *
+ * @deprecated This utility is deprecated in favor of opting into Single Fetch
+ * via `future.v3_singleFetch` and returning raw objects.  This method will be
+ * removed in React Router v7.
  *
  * @see https://remix.run/utils/defer
  */
@@ -67,6 +83,27 @@ export type RedirectFunction = (
  */
 export const redirect: RedirectFunction = (url, init = 302) => {
   return routerRedirect(url, init) as TypedResponse<never>;
+};
+
+/**
+ * A redirect response. Sets the status code and the `Location` header.
+ * Defaults to "302 Found".
+ *
+ * @see https://remix.run/utils/redirect
+ */
+export const replace: RedirectFunction = (url, init = 302) => {
+  return routerReplace(url, init) as TypedResponse<never>;
+};
+
+/**
+ * A redirect response that will force a document reload to the new location.
+ * Sets the status code and the `Location` header.
+ * Defaults to "302 Found".
+ *
+ * @see https://remix.run/utils/redirect
+ */
+export const redirectDocument: RedirectFunction = (url, init = 302) => {
+  return routerRedirectDocument(url, init) as TypedResponse<never>;
 };
 
 export function isDeferredData(value: any): value is DeferredData {

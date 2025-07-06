@@ -1,9 +1,13 @@
 import { test, expect } from "@playwright/test";
-import { ServerMode } from "@remix-run/server-runtime/mode";
 
-import { createAppFixture, createFixture, js } from "./helpers/create-fixture";
-import type { AppFixture, Fixture } from "./helpers/create-fixture";
-import { PlaywrightFixture } from "./helpers/playwright-fixture";
+import { ServerMode } from "../build/node_modules/@remix-run/server-runtime/dist/mode.js";
+import {
+  createAppFixture,
+  createFixture,
+  js,
+} from "./helpers/create-fixture.js";
+import type { AppFixture, Fixture } from "./helpers/create-fixture.js";
+import { PlaywrightFixture } from "./helpers/playwright-fixture.js";
 
 test.describe("loader in an app", async () => {
   let appFixture: AppFixture;
@@ -23,6 +27,7 @@ test.describe("loader in an app", async () => {
           export default () => (
             <>
               <Link to="/redirect">Redirect</Link>
+              <Link to="/some-404-path">404 route</Link>
               <Form action="/redirect-to" method="post">
                 <input name="destination" defaultValue="/redirect-destination" />
                 <button type="submit">Redirect</button>
@@ -51,6 +56,11 @@ test.describe("loader in an app", async () => {
         `,
         "app/routes/redirect-destination.tsx": js`
           export default () => <div data-testid="redirect-destination">You made it!</div>
+        `,
+        "app/routes/defer.tsx": js`
+          import { defer } from "@remix-run/node";
+
+          export let loader = () => defer({ data: 'whatever' });
         `,
         "app/routes/data[.]json.tsx": js`
           import { json } from "@remix-run/node";
@@ -103,6 +113,19 @@ test.describe("loader in an app", async () => {
           import { json } from "@remix-run/node";
           export let loader = () => {
             return json({ ok: true });
+          }
+        `,
+        "app/routes/$.tsx": js`
+          import { json } from "@remix-run/node";
+          import { useRouteError } from "@remix-run/react";
+          export function loader({ request }) {
+            throw json({ message: new URL(request.url).pathname + ' not found' }, {
+              status: 404
+            });
+          }
+          export function ErrorBoundary() {
+            let error = useRouteError();
+            return <pre>{error.status + ' ' + error.data.message}</pre>;
           }
         `,
       },
@@ -163,6 +186,16 @@ test.describe("loader in an app", async () => {
         "Unexpected Server Error\n\nError: Oh noes!"
       );
     });
+
+    test("should let loader throw to it's own boundary without a default export", async ({
+      page,
+    }) => {
+      let app = new PlaywrightFixture(appFixture, page);
+      await app.goto("/", true);
+      await app.clickLink("/some-404-path");
+      let html = await app.getHtml();
+      expect(html).toMatch("404 /some-404-path not found");
+    });
   }
 
   test("should handle responses returned from resource routes", async ({
@@ -214,14 +247,30 @@ test.describe("loader in an app", async () => {
     page,
   }) => {
     let logs: string[] = [];
-    page.on("console", (msg) => logs.push(msg.text()));
+    page.on("console", (msg) => {
+      if (!msg.text().includes("React Router Future Flag Warning")) {
+        logs.push(msg.text());
+      }
+    });
     let app = new PlaywrightFixture(appFixture, page);
     await app.goto("/");
     await app.clickSubmitButton("/no-action");
     let html = await app.getHtml();
-    expect(html).toMatch("Application Error");
+    expect(html).toMatch("405 Method Not Allowed");
     expect(logs[0]).toContain(
       'Route "routes/no-action" does not have an action'
+    );
+  });
+
+  test("should error if a defer is returned from a resource route", async ({
+    page,
+  }) => {
+    let app = new PlaywrightFixture(appFixture, page);
+    let res = await app.goto("/defer");
+    expect(res.status()).toBe(500);
+    expect(await res.text()).toMatch(
+      "You cannot return a `defer()` response from a Resource Route.  " +
+        'Did you forget to export a default UI component from the "routes/defer" route?'
     );
   });
 });

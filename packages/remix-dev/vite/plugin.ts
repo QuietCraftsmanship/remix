@@ -892,7 +892,9 @@ export const remixVitePlugin: RemixVitePlugin = (remixUserConfig = {}) => {
     remixBrowserManifest: RemixManifest;
     remixServerManifest: RemixManifest;
   }> => {
+
     invariant(viteConfig);
+
 
     let viteManifest = await loadViteManifest(
       getClientBuildDirectory(ctx.remixConfig)

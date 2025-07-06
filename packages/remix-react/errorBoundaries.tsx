@@ -2,6 +2,9 @@ import * as React from "react";
 import type { Location } from "@remix-run/router";
 import { isRouteErrorResponse } from "react-router-dom";
 
+
+import { useRemixContext } from "./components";
+
 import { Scripts, useRemixContext } from "./components";
 
 type RemixErrorBoundaryProps = React.PropsWithChildren<{
@@ -93,10 +96,18 @@ export function RemixRootDefaultErrorBoundary({
   if (isRouteErrorResponse(error)) {
     return (
       <BoundaryShell title="Unhandled Thrown Response!">
+
+        <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem" }}>
+          <h1 style={{ fontSize: "24px" }}>
+            {error.status} {error.statusText}
+          </h1>
+        </main>
+
         <h1 style={{ fontSize: "24px" }}>
           {error.status} {error.statusText}
         </h1>
         {heyDeveloper}
+
       </BoundaryShell>
     );
   }
@@ -148,6 +159,25 @@ export function BoundaryShell({
 }) {
   let { routeModules } = useRemixContext();
 
+
+  let contents = (
+    <>
+      {children}
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+              console.log(
+                "💿 Hey developer 👋. You can provide a way better UX than this when your app throws errors. Check out https://remix.run/guides/errors for more information."
+              );
+            `,
+        }}
+      />
+    </>
+  );
+
+  if (routeModules.root?.Layout) {
+    return contents;
+
   // Generally speaking, when the root route has a Layout we want to use that
   // as the app shell instead of the default `BoundaryShell` wrapper markup below.
   // This is true for `loader`/`action` errors, most render errors, and
@@ -166,6 +196,7 @@ export function BoundaryShell({
   // returning an `<html>` document.
   if (routeModules.root?.Layout && !isOutsideRemixApp) {
     return children;
+
   }
 
   return (
@@ -178,12 +209,15 @@ export function BoundaryShell({
         />
         <title>{title}</title>
       </head>
+      <body>{contents}</body>
+
       <body>
         <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem" }}>
           {children}
           {renderScripts ? <Scripts /> : null}
         </main>
       </body>
+
     </html>
   );
 }

@@ -135,6 +135,9 @@ export let create = async (ctx: Context): Promise<Compiler> => {
         let { serverBuildPath } = serverBundles[i];
         writes.push(Server.write(ctx.config, serverBuildPath, server.value));
       })
+
+    );
+
     ).then(() => {
       // write the version to a sentinel file _after_ the server has been written
       // this allows the app server to watch for changes to `version.txt`
@@ -145,6 +148,7 @@ export let create = async (ctx: Context): Promise<Compiler> => {
       );
       fs.writeFileSync(versionTxt, manifest.version);
     });
+
 
     await Promise.all(writes);
     return manifest;

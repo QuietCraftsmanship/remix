@@ -7,7 +7,7 @@ description: When, why, and how to stream with React 18 and Remix's deferred API
 
 Streaming allows you to enhance user experience by delivering content as soon as it's available, rather than waiting for the entire content of a page to be ready.
 
-Ensure your hosting provider supports streaming, not all of them do. If your responses don't seem to stream, this might be the cause.
+Ensure your hosting provider supports streaming; not all of them do. If your responses don't seem to stream, this might be the cause.
 
 ## Steps
 
@@ -21,7 +21,7 @@ There are three steps to streaming data:
 
 **Ready from Start:** Remix apps created using starter templates are pre-configured for streaming.
 
-**Manual Setup Needed?:** If your project began from scratch or used an older template, verify `entry.server.tsx` and `entry.client.tsx` have streaming support. If you don't see these files then you are using the defaults and streaming is supported. If you have created your own entries, the following are the template defaults for your reference:
+**Manual Setup Needed?:** If your project began from scratch or used an older template, verify `entry.server.tsx` and `entry.client.tsx` have streaming support. If you don't see these files, then you are using the defaults and streaming is supported. If you have created your own entries, the following are the template defaults for your reference:
 
 - [entry.client.tsx][entry_client_tsx]
 - entry.server.tsx:
@@ -61,7 +61,7 @@ export default function Product() {
 }
 ```
 
-In order to render streamed data, you need to use [`<Suspense>`][suspense_component] from React and [`<Await>`][await_component] from Remix. It's a bit of boilerplate, but straightforward:
+To render streamed data, you need to use [`<Suspense>`][suspense_component] from React and [`<Await>`][await_component] from Remix. It's a bit of boilerplate, but straightforward:
 
 ```tsx lines=[3-4,20-24]
 import type { LoaderFunctionArgs } from "@remix-run/node"; // or cloudflare/deno
@@ -130,7 +130,7 @@ export default function Product() {
 }
 ```
 
-Instead of awaiting the reviews promise, we pass it to `defer`. This tells Remix to stream that promise over the network to the browser.
+Instead of awaiting the `reviews` promise, we pass it to `defer`. This tells Remix to stream that promise over the network to the browser.
 
 That's it! You should now be streaming data to the browser.
 
@@ -153,17 +153,40 @@ export async function loader({
 }
 ```
 
+## Handling Server Timeouts
+
+When using `defer` for streaming, you can tell Remix how long to wait for deferred data to resolve before timing out via the `<RemixServer abortDelay>` prop (which defaults to 5 seconds) in your `entry.server.tsx` file. If you don't currently have an `entry.server.tsx` file you can expose it via `npx remix reveal entry.server`. You can also use this value to abort the React `renderToPipeableStream` method via a `setTimeout`.
+
+```tsx filename=entry.server.tsx lines=[1,9,16]
+const ABORT_DELAY = 5_000;
+
+// ...
+
+const { pipe, abort } = renderToPipeableStream(
+  <RemixServer
+    context={remixContext}
+    url={request.url}
+    abortDelay={ABORT_DELAY}
+  />
+  // ...
+);
+
+// ...
+
+setTimeout(abort, ABORT_DELAY);
+```
+
 ## Streaming with a Content Security Policy
 
 Streaming works by inserting script tags into the DOM as deferred promises resolve. If your page includes a [Content Security Policy for scripts][csp], you'll either need to weaken your security policy by including `script-src 'self' 'unsafe-inline'` in your `Content-Security-Policy` header, or add nonces to all of your script tags.
 
-If you are using a nonce, it needs to be included in three places:
+If you are using a `nonce`, it needs to be included in three places:
 
 - The `Content-Security-Policy` header, like so: `Content-Security-Policy: script-src 'nonce-secretnoncevalue'`
 - The `<Scripts />`, `<ScrollRestoration />` and `<LiveReload />` components, like so: `<Scripts nonce="secretnoncevalue" />`
 - In `entry.server.ts` where you call `renderToPipeableStream`, like so:
 
-```tsx
+```tsx filename=entry.server.tsx
 const { pipe, abort } = renderToPipeableStream(
   <RemixServer
     context={remixContext}

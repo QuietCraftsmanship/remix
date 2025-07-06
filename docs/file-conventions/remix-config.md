@@ -1,10 +1,13 @@
 ---
 title: remix.config.js
+hidden: true
 ---
 
 # remix.config.js
 
-This file has a few build and development configuration options, but does not actually run on your server.
+<docs-warning>`remix.config.js` is only relevant when using the [Classic Remix Compiler][classic-remix-compiler]. When using [Remix Vite][remix-vite], this file should not be present in your project. Instead, Remix configuration should be provided to the Remix plugin in your [Vite config][vite-config].</docs-warning>
+
+This file has a few build and development configuration options but does not run on your server.
 
 ```js filename=remix.config.js
 /** @type {import('@remix-run/dev').AppConfig} */
@@ -14,7 +17,7 @@ module.exports = {
   future: {
     /* any enabled future flags */
   },
-  ignoredRouteFiles: ["**/.*"],
+  ignoredRouteFiles: ["**/*.css"],
   publicPath: "/build/",
   routes(defineRoutes) {
     return defineRoutes((route) => {
@@ -41,20 +44,23 @@ exports.appDirectory = "./elsewhere";
 ## assetsBuildDirectory
 
 The path to the browser build, relative to remix.config.js. Defaults to
-"public/build". Should be deployed to static hosting.
+`"public/build"`. Should be deployed to static hosting.
 
 ## browserNodeBuiltinsPolyfill
 
-The Node.js polyfills to include in the browser build. Polyfills are provided by [JSPM][jspm] and configured via \[esbuild-plugins-node-modules-polyfill].
+The Node.js polyfills to include in the browser build. Polyfills are provided by [JSPM][jspm] and configured via [esbuild-plugins-node-modules-polyfill].
 
 ```js filename=remix.config.js
-exports.browserNodeBuiltinsPolyfill = {
-  modules: {
-    buffer: true, // Provide a JSPM polyfill
-    fs: "empty", // Provide an empty polyfill
-  },
-  globals: {
-    Buffer: true,
+/** @type {import('@remix-run/dev').AppConfig} */
+module.exports = {
+  browserNodeBuiltinsPolyfill: {
+    modules: {
+      buffer: true, // Provide a JSPM polyfill
+      fs: "empty", // Provide an empty polyfill
+    },
+    globals: {
+      Buffer: true,
+    },
   },
 };
 ```
@@ -68,18 +74,14 @@ relative to `remix.config.js`. Defaults to `".cache"`.
 
 ## future
 
-The `future` config lets you opt-into future breaking changes via [Future Flags][future-flags]. The following future flags currently exist in Remix v2 and will become the default behavior in Remix v3:
-
-- **`v3_fetcherPersist`**: Change fetcher persistence/cleanup behavior in 2 ways ([RFC][fetcherpersist-rfc]):
-  - Fetchers are no longer removed on unmount, and remain exposed via [`useFetchers`][use-fetchers] until they return to an `idle` state
-  - Fetchers that complete while still mounted no longer persist in [`useFetchers`][use-fetchers] since you can access those fetchers via [`useFetcher`][use-fetcher]
+The `future` config lets you opt-into future breaking changes via [Future Flags][future-flags]. Please see the [Current Future Flags][current-future-flags] section for a list of all available Future Flags.
 
 ## ignoredRouteFiles
 
 This is an array of globs (via [minimatch][minimatch]) that Remix will match to
 files while reading your `app/routes` directory. If a file matches, it will be
 ignored rather than treated like a route module. This is useful for ignoring
-dotfiles (like `.DS_Store` files) or CSS/test files you wish to colocate.
+CSS/test files you wish to colocate.
 
 ## publicPath
 
@@ -93,7 +95,7 @@ module.exports = {
 };
 ```
 
-If you wish to serve static assets from a separate domain you may also specify an absolute path:
+If you wish to serve static assets from a separate domain, you may also specify an absolute path:
 
 ```js filename=remix.config.js
 /** @type {import('@remix-run/dev').AppConfig} */
@@ -161,7 +163,7 @@ field in `package.json`.
 
 A list of regex patterns that determines if a module is transpiled and included
 in the server bundle. This can be useful when consuming ESM only packages in a
-CJS build, or when consuming packages with [CSS side effect
+CJS build or when consuming packages with [CSS side effect
 imports][css_side_effect_imports].
 
 For example, the `unified` ecosystem is all ESM-only. Let's also say we're using
@@ -176,7 +178,7 @@ module.exports = {
   assetsBuildDirectory: "public/build",
   publicPath: "/build/",
   serverBuildPath: "build/index.js",
-  ignoredRouteFiles: ["**/.*"],
+  ignoredRouteFiles: ["**/*.css"],
   serverDependenciesToBundle: [
     /^rehype.*/,
     /^remark.*/,
@@ -206,7 +208,7 @@ Defaults to `"esm"`.
 
 ## serverNodeBuiltinsPolyfill
 
-The Node.js polyfills to include in the server build when targeting non-Node.js server platforms. Polyfills are provided by [JSPM][jspm] and configured via [esbuild_plugins_node_modules_polyfill][esbuild_plugins_node_modules_polyfill].
+The Node.js polyfills to include in the server build when targeting non-Node.js server platforms. Polyfills are provided by [JSPM][jspm] and configured via [esbuild-plugins-node-modules-polyfill].
 
 ```js filename=remix.config.js
 /** @type {import('@remix-run/dev').AppConfig} */
@@ -216,9 +218,9 @@ module.exports = {
       buffer: true, // Provide a JSPM polyfill
       fs: "empty", // Provide an empty polyfill
     },
-  },
-  globals: {
-    Buffer: true,
+    globals: {
+      Buffer: true,
+    },
   },
 };
 ```
@@ -232,7 +234,7 @@ The platform the server build is targeting, which can either be `"neutral"` or
 
 ## tailwind
 
-Whether to support [Tailwind functions and directives][tailwind_functions_and_directives] in CSS files if `tailwindcss` is installed. Defaults to `true`.
+Whether to support [Tailwind CSS functions and directives][tailwind_functions_and_directives] in CSS files if `tailwindcss` is installed. Defaults to `true`.
 
 ```js filename=remix.config.js
 /** @type {import('@remix-run/dev').AppConfig} */
@@ -269,10 +271,11 @@ There are a few conventions that Remix uses you should be aware of.
 [postcss]: https://postcss.org
 [tailwind_functions_and_directives]: https://tailwindcss.com/docs/functions-and-directives
 [jspm]: https://github.com/jspm/jspm-core
-[esbuild_plugins_node_modules_polyfill]: https://npm.im/esbuild-plugins-node-modules-polyfill
+[esbuild-plugins-node-modules-polyfill]: https://npm.im/esbuild-plugins-node-modules-polyfill
 [browser-node-builtins-polyfill]: #browsernodebuiltinspolyfill
 [server-node-builtins-polyfill]: #servernodebuiltinspolyfill
 [future-flags]: ../start/future-flags
-[fetcherpersist-rfc]: https://github.com/remix-run/remix/discussions/7698
-[use-fetchers]: ../hooks/use-fetchers
-[use-fetcher]: ../hooks/use-fetcher
+[current-future-flags]: ../start/future-flags#current-future-flags
+[classic-remix-compiler]: ../guides/vite#classic-remix-compiler-vs-remix-vite
+[remix-vite]: ../guides/vite
+[vite-config]: ./vite-config

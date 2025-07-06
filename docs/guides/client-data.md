@@ -6,15 +6,15 @@ title: Client Data
 
 Remix introduced support for "Client Data" ([RFC][rfc]) in [`v2.4.0`][2.4.0] which allows you to opt-into running route loaders/actions in the browser via [`clientLoader`][clientloader]/[`clientAction`][clientaction] exports from your route.
 
-These new exports are a bit of a sharp knife and are not recommended as your _primary_ data loading/submission mechanisms - but instead give you a lever to pull on for some of the following advanced use cases:
+These new exports are a bit of a sharp knife and are not recommended as your _primary_ data loading/submission mechanisms — but instead give you a lever to pull on for some of the following advanced use cases:
 
 - **Skip the Hop:** Query a data API directly from the browser, using loaders simply for SSR
 - **Fullstack State:** Augment server data with client data for your full set of loader data
 - **One or the Other:** Sometimes you use server loaders, sometimes you use client loaders, but not both on one route
 - **Client Cache:** Cache server loader data in the client and avoid some server calls
-- **Migration:** Ease your migration from React Router -> Remix SPA -> Remix SSR (once Remix supports [SPA Mode][rfc-spa])
+- **Migration:** Ease your migration from React Router → Remix SPA → Remix SSR (once Remix supports [SPA Mode][rfc-spa])
 
-Please use these new exports with caution! If you're not careful - it's easy to get your UI out of sync. Remix out of the box tries _very_ hard to ensure that this doesn't happen - but once you take control over your own client-side cache, and potentially prevent Remix from performing it's normal server `fetch` calls - then Remix can no longer guarantee your UI remains in sync.
+Please use these new exports with caution! If you're not careful — it's straightforward to get your UI out of sync. Remix out of the box tries _very_ hard to ensure that this doesn't happen - but once you take control over your own client-side cache, and potentially prevent Remix from performing its normal server `fetch` calls - then Remix can no longer guarantee your UI remains in sync.
 
 ## Skip the Hop
 
@@ -88,7 +88,7 @@ export function HydrateFallback() {
 }
 
 export default function Component() {
-  // This will always be the combined set of server + client data
+  // This will always be the combined set of server and client data
   const data = useLoaderData();
   return <>...</>;
 }
@@ -103,7 +103,7 @@ You may want to mix and match data loading strategies in your application such t
 
 A route that only depends on a server loader looks like this:
 
-```tsx filename="app/routes/server-data-route.tsx
+```tsx filename=app/routes/server-data-route.tsx
 import type { LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 
@@ -115,38 +115,32 @@ export async function loader({
 }
 
 export default function Component() {
-  const data = useLoaderData(); // server data
+  const data = useLoaderData(); // (1) - server data
   return <>...</>;
 }
 ```
 
 A route that only depends on a client loader looks like this.
 
-```tsx filename="app/routes/client-data-route.tsx
+```tsx filename=app/routes/client-data-route.tsx
 import type { ClientLoaderFunctionArgs } from "@remix-run/react";
 
 export async function clientLoader({
   request,
-  serverLoader,
 }: ClientLoaderFunctionArgs) {
-  const [serverData, clientData] = await Promise.all([
-    serverLoader(),
-    getClientData(request),
-  ]);
-  return {
-    ...serverData, // (4)
-    ...clientData, // (4)
-  };
+  const clientData = await getClientData(request);
+  return clientData;
 }
 // Note: you do not have to set this explicitly - it is implied if there is no `loader`
 clientLoader.hydrate = true;
 
+// (2)
 export function HydrateFallback() {
-  return <p>Skeleton rendered during SSR</p>; // (2)
+  return <p>Skeleton rendered during SSR</p>;
 }
 
 export default function Component() {
-  const data = useLoaderData(); // client data
+  const data = useLoaderData(); // (2) - client data
   return <>...</>;
 }
 ```
@@ -233,7 +227,7 @@ We expect to write up a separate guide for migrations once [SPA Mode][rfc-spa] l
 3. Incrementally move to file-based route definitions via the use of a Vite plugin (not yet provided)
 4. Migrate your React Router SPA to Remix SPA Mode where all current file-based `loader` function act as `clientLoader`
 5. Opt out of Remix SPA Mode (and into Remix SSR mode) and find/replace your `loader` functions to `clientLoader`
-   - You're now running an SSR app but all your data loading is still happening in the client via `clientLoader`
+   - You're now running an SSR app, but all your data loading is still happening in the client via `clientLoader`
 6. Incrementally start moving `clientLoader -> loader` to start moving data loading to the server
 
 [rfc]: https://github.com/remix-run/remix/discussions/7634

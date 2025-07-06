@@ -16,6 +16,42 @@ import { Link } from "@remix-run/react";
 
 ## Props
 
+### `to: string`
+
+The most basic usage takes an `href` string:
+
+```tsx
+<Link to="/some/path" />
+```
+
+### `to: Partial<Path>`
+
+You can also pass a `Partial<Path>` value:
+
+```tsx
+<Link
+  to={{
+    pathname: "/some/path",
+    search: "?query=string",
+    hash: "#hash",
+  }}
+/>
+```
+
+### `discover`
+
+Defines the route discovery behavior when using [`future.v3_lazyRouteDiscovery`][lazy-route-discovery].
+
+```tsx
+<>
+  <Link /> {/* defaults to "render" */}
+  <Link discover="none" />
+</>
+```
+
+- **render** — default, discover the route when the link renders
+- **none** — don't eagerly discover, only discover if the link is clicked
+
 ### `prefetch`
 
 Defines the data and module prefetching behavior for the link.
@@ -30,10 +66,10 @@ Defines the data and module prefetching behavior for the link.
 </>
 ```
 
-- **none** - default, no prefetching
-- **intent** - prefetches when the user hovers or focuses the link
-- **render** - prefetches when the link renders
-- **viewport** - prefetches when the link is in the viewport, very useful for mobile
+- **none** — default, no prefetching
+- **intent** — prefetches when the user hovers or focuses the link
+- **render** — prefetches when the link renders
+- **viewport** — prefetches when the link is in the viewport, very useful for mobile
 
 Prefetching is done with HTML `<link rel="prefetch">` tags. They are inserted after the link.
 
@@ -100,8 +136,8 @@ Defines the relative path behavior for the link.
 <Link relative="path" />;
 ```
 
-- **route** - default, relative to the route hierarchy so `..` will remove all URL segments of the current route pattern
-- **path** - relative to the path so `..` will remove one URL segment
+- **route** — default, relative to the route hierarchy so `..` will remove all URL segments of the current route pattern
+- **path** — relative to the path so `..` will remove one URL segment
 
 ### `reloadDocument`
 
@@ -132,7 +168,7 @@ A -> C
 
 ### `state`
 
-Adds persistent client side routing state to the next location.
+Adds a persistent client side routing state to the next location.
 
 ```tsx
 <Link to="/somewhere/else" state={{ some: "value" }} />
@@ -149,24 +185,23 @@ function SomeComp() {
 
 This state is inaccessible on the server as it is implemented on top of [`history.state`][history-state].
 
-## `unstable_viewTransition`
+## `viewTransition`
 
-The `unstable_viewTransition` prop enables a [View Transition][view-transitions] for this navigation by wrapping the final state update in [`document.startViewTransition()`][document-start-view-transition]:
+The `viewTransition` prop enables a [View Transition][view-transitions] for this navigation by wrapping the final state update in [`document.startViewTransition()`][document-start-view-transition]:
 
 ```jsx
-<Link to={to} unstable_viewTransition>
+<Link to={to} viewTransition>
   Click me
 </Link>
 ```
 
-If you need to apply specific styles for this view transition, you will also need to leverage the [`unstable_useViewTransitionState()`][use-view-transition-state]:
+If you need to apply specific styles for this view transition, you will also need to leverage the [`useViewTransitionState()`][use-view-transition-state]:
 
 ```jsx
 function ImageLink(to) {
-  const isTransitioning =
-    unstable_useViewTransitionState(to);
+  const isTransitioning = useViewTransitionState(to);
   return (
-    <Link to={to} unstable_viewTransition>
+    <Link to={to} viewTransition>
       <p
         style={{
           viewTransitionName: isTransitioning
@@ -190,13 +225,10 @@ function ImageLink(to) {
 }
 ```
 
-<docs-warning>
-Please note that this API is marked unstable and may be subject to breaking changes without a major release.
-</docs-warning>
-
 [scroll-restoration-component]: ./scroll-restoration
 [history-state]: https://developer.mozilla.org/en-US/docs/Web/API/History/state
 [view-transitions]: https://developer.mozilla.org/en-US/docs/Web/API/View_Transitions_API
 [document-start-view-transition]: https://developer.mozilla.org/en-US/docs/Web/API/Document/startViewTransition
 [use-view-transition-state]: ../hooks/use-view-transition-state
 [relativesplatpath]: ../hooks/use-resolved-path#splat-paths
+[lazy-route-discovery]: ../guides/lazy-route-discovery

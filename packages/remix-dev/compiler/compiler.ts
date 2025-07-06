@@ -31,10 +31,23 @@ export let create = async (ctx: Context): Promise<Compiler> => {
     manifestChannel: undefined as unknown as Channel.Type<Manifest>,
   };
 
+  let serverBundles = Array.isArray(ctx.config.serverBundles)
+    ? ctx.config.serverBundles
+    : [
+        {
+          serverBuildPath: ctx.config.serverBuildPath,
+          routes: ctx.config.routes,
+        },
+      ];
+
   let subcompiler = {
     css: await CSS.createCompiler(ctx),
     js: await JS.createCompiler(ctx, refs),
-    server: await Server.createCompiler(ctx, refs),
+    serverBundles: await Promise.all(
+      serverBundles.map(({ routes, serverBuildPath }) =>
+        Server.createCompiler(ctx, routes, serverBuildPath, refs)
+      )
+    ),
   };
   let cancel = async () => {
     // resolve channels with error so that downstream tasks don't hang waiting for results from upstream tasks
@@ -45,7 +58,7 @@ export let create = async (ctx: Context): Promise<Compiler> => {
     await Promise.all([
       subcompiler.css.cancel(),
       subcompiler.js.cancel(),
-      subcompiler.server.cancel(),
+      ...subcompiler.serverBundles.map((server) => server.cancel()),
     ]);
   };
 
@@ -62,12 +75,7 @@ export let create = async (ctx: Context): Promise<Compiler> => {
     };
 
     // keep track of manually written artifacts
-    let writes: {
-      js?: Promise<void>;
-      cssBundle?: Promise<void>;
-      manifest?: Promise<void>;
-      server?: Promise<void>;
-    } = {};
+    let writes: Promise<void>[] = [];
 
     // reset refs for this compilation
     refs.manifestChannel = Channel.create();
@@ -76,7 +84,7 @@ export let create = async (ctx: Context): Promise<Compiler> => {
         let { bundleOutputFile, outputFiles } = await subcompiler.css.compile();
 
         if (bundleOutputFile) {
-          writes.cssBundle = CSS.writeBundle(ctx, outputFiles);
+          writes.push(CSS.writeBundle(ctx, outputFiles));
         }
 
         return (
@@ -96,14 +104,16 @@ export let create = async (ctx: Context): Promise<Compiler> => {
     // kickoff compilations in parallel
     let tasks = {
       js: subcompiler.js.compile().then(ok, errCancel),
-      server: subcompiler.server.compile().then(ok, errCancel),
+      serverBundles: subcompiler.serverBundles.map((server) =>
+        server.compile().then(ok, errCancel)
+      ),
     };
 
     // js compilation (implicitly writes artifacts/js)
     let js = await tasks.js;
     if (!js.ok) throw error ?? js.error;
     let { metafile, outputFiles, hmr } = js.value;
-    writes.js = JS.write(ctx.config, outputFiles);
+    writes.push(JS.write(ctx.config, outputFiles));
 
     // artifacts/manifest
     let manifest = await createManifest({
@@ -114,31 +124,40 @@ export let create = async (ctx: Context): Promise<Compiler> => {
     });
     refs.manifestChannel.ok(manifest);
     options.onManifest?.(manifest);
-    writes.manifest = writeManifest(ctx.config, manifest);
+    writes.push(writeManifest(ctx.config, manifest));
 
     // server compilation
-    let server = await tasks.server;
-    if (!server.ok) throw error ?? server.error;
-    // artifacts/server
-    writes.server = Server.write(ctx.config, server.value).then(() => {
+    await Promise.all(
+      tasks.serverBundles.map(async (promise, i) => {
+        let server = await promise;
+        if (!server.ok) throw error ?? server.error;
+        // artifacts/server
+        let { serverBuildPath } = serverBundles[i];
+        writes.push(Server.write(ctx.config, serverBuildPath, server.value));
+      })
+    ).then(() => {
       // write the version to a sentinel file _after_ the server has been written
       // this allows the app server to watch for changes to `version.txt`
       // avoiding race conditions when the app server would attempt to reload a partially written server build
       let versionTxt = path.join(
-        path.dirname(ctx.config.serverBuildPath),
+        path.dirname(serverBundles[0].serverBuildPath),
         "version.txt"
       );
       fs.writeFileSync(versionTxt, manifest.version);
     });
 
-    await Promise.all(Object.values(writes));
+    await Promise.all(writes);
     return manifest;
   };
   return {
     compile,
     cancel,
     dispose: async () => {
-      await Promise.all(Object.values(subcompiler).map((sub) => sub.dispose()));
+      await Promise.all([
+        subcompiler.css.dispose(),
+        subcompiler.js.dispose(),
+        ...subcompiler.serverBundles.map((server) => server.dispose()),
+      ]);
     },
   };
 };

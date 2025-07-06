@@ -9,6 +9,7 @@ import babel from "@babel/core";
 import {
   type ServerBuild,
   unstable_setDevServerHooks as setDevServerHooks,
+  createRequestHandler,
 } from "@remix-run/server-runtime";
 import {
   init as initEsModuleLexer,
@@ -16,52 +17,128 @@ import {
 } from "es-module-lexer";
 import jsesc from "jsesc";
 import pick from "lodash/pick";
+import omit from "lodash/omit";
 import colors from "picocolors";
 
-import { type ConfigRoute, type RouteManifest } from "../config/routes";
+import { type RouteManifestEntry, type RouteManifest } from "../config/routes";
 import {
-  type AppConfig as RemixUserConfig,
-  type RemixConfig as ResolvedRemixConfig,
-  resolveConfig,
+  type AppConfig as RemixEsbuildUserConfig,
+  type RemixConfig as ResolvedRemixEsbuildConfig,
+  resolveConfig as resolveCommonConfig,
+  findConfig,
 } from "../config";
-import { type Manifest } from "../manifest";
+import { type Manifest as RemixManifest } from "../manifest";
 import invariant from "../invariant";
-import { createRequestHandler } from "./node/adapter";
+import {
+  type NodeRequestHandler,
+  fromNodeRequest,
+  toNodeRequest,
+} from "./node-adapter";
 import { getStylesForUrl, isCssModulesFile } from "./styles";
 import * as VirtualModule from "./vmod";
 import { resolveFileUrl } from "./resolve-file-url";
+import { combineURLs } from "./combine-urls";
 import { removeExports } from "./remove-exports";
-import { replaceImportSpecifier } from "./replace-import-specifier";
-import { importViteEsmSync, preloadViteEsm } from "./import-vite-esm-sync";
+import { ssrExternals } from "./ssr-externals";
+import { getVite, preloadVite } from "./vite";
+import * as ViteNode from "./vite-node";
 
-const supportedRemixConfigKeys = [
+export async function resolveViteConfig({
+  configFile,
+  mode,
+  root,
+}: {
+  configFile?: string;
+  mode?: string;
+  root: string;
+}) {
+  await preloadVite();
+  let vite = getVite();
+
+  let viteConfig = await vite.resolveConfig(
+    { mode, configFile, root },
+    "build", // command
+    "production", // default mode
+    "production" // default NODE_ENV
+  );
+
+  if (typeof viteConfig.build.manifest === "string") {
+    throw new Error("Custom Vite manifest paths are not supported");
+  }
+
+  return viteConfig;
+}
+
+export async function extractRemixPluginContext(
+  viteConfig: Vite.ResolvedConfig
+) {
+  return viteConfig["__remixPluginContext" as keyof typeof viteConfig] as
+    | RemixPluginContext
+    | undefined;
+}
+
+export async function loadVitePluginContext({
+  configFile,
+  root,
+}: {
+  configFile?: string;
+  root?: string;
+}) {
+  if (!root) {
+    root = process.env.REMIX_ROOT || process.cwd();
+  }
+
+  configFile =
+    configFile ??
+    findConfig(root, "vite.config", [
+      ".ts",
+      ".cts",
+      ".mts",
+      ".js",
+      ".cjs",
+      ".mjs",
+    ]);
+
+  // V3 TODO: Vite config should not be optional
+  if (!configFile) {
+    return;
+  }
+
+  let viteConfig = await resolveViteConfig({ configFile, root });
+  return await extractRemixPluginContext(viteConfig);
+}
+
+const supportedRemixEsbuildConfigKeys = [
   "appDirectory",
-  "assetsBuildDirectory",
   "future",
   "ignoredRouteFiles",
-  "publicPath",
   "routes",
   "serverModuleFormat",
-] as const satisfies ReadonlyArray<keyof RemixUserConfig>;
-type SupportedRemixConfigKey = typeof supportedRemixConfigKeys[number];
-type SupportedRemixConfig = Pick<RemixUserConfig, SupportedRemixConfigKey>;
+] as const satisfies ReadonlyArray<keyof RemixEsbuildUserConfig>;
+type SupportedRemixEsbuildUserConfig = Pick<
+  RemixEsbuildUserConfig,
+  typeof supportedRemixEsbuildConfigKeys[number]
+>;
 
-const SERVER_ONLY_EXPORTS = ["loader", "action", "headers"];
+const SERVER_ONLY_ROUTE_EXPORTS = ["loader", "action", "headers"];
+const CLIENT_ROUTE_EXPORTS = [
+  "clientAction",
+  "clientLoader",
+  "default",
+  "ErrorBoundary",
+  "handle",
+  "HydrateFallback",
+  "Layout",
+  "links",
+  "meta",
+  "shouldRevalidate",
+];
 
-// We need to provide different JSDoc comments in some cases due to differences
-// between the Remix config and the Vite plugin.
-type RemixConfigJsdocOverrides = {
-  /**
-   * The path to the browser build, relative to the project root. Defaults to
-   * `"build/client"`.
-   */
-  assetsBuildDirectory?: SupportedRemixConfig["assetsBuildDirectory"];
-  /**
-   * The URL prefix of the browser build with a trailing slash. Defaults to
-   * `"/"`. This is the path the browser will use to find assets.
-   */
-  publicPath?: SupportedRemixConfig["publicPath"];
-};
+/** This is used to manage a build optimization to remove unused route exports
+from the client build output. This is important in cases where custom route
+exports are only ever used on the server. Without this optimization we can't
+tree-shake any unused custom exports because routes are entry points. */
+const BUILD_CLIENT_ROUTE_QUERY_STRING = "?__remix-build-client-route";
 
 // Only expose a subset of route properties to the "serverBundles" function
 const branchRouteProperties = [
@@ -69,86 +146,165 @@ const branchRouteProperties = [
   "path",
   "file",
   "index",
-] as const satisfies ReadonlyArray<keyof ConfigRoute>;
-type BranchRoute = Pick<ConfigRoute, typeof branchRouteProperties[number]>;
+] as const satisfies ReadonlyArray<keyof RouteManifestEntry>;
+type BranchRoute = Pick<
+  RouteManifestEntry,
+  typeof branchRouteProperties[number]
+>;
 
 export const configRouteToBranchRoute = (
-  configRoute: ConfigRoute
+  configRoute: RouteManifestEntry
 ): BranchRoute => pick(configRoute, branchRouteProperties);
 
-type ServerBundlesFunction = (args: {
+export type ServerBundlesFunction = (args: {
   branch: BranchRoute[];
 }) => string | Promise<string>;
 
-export type RemixVitePluginOptions = RemixConfigJsdocOverrides &
-  Omit<SupportedRemixConfig, keyof RemixConfigJsdocOverrides> & {
-    /**
-     * The path to the server build directory, relative to the project. This
-     * directory should be deployed to your server. Defaults to
-     * `"build/server"`.
-     */
-    serverBuildDirectory?: string;
-    /**
-     * The file name of the server build output. This file
-     * should end in a `.js` extension and should be deployed to your server.
-     * Defaults to `"index.js"`.
-     */
-    serverBuildFile?: string;
-    /**
-     * A function for assigning routes to different server bundles. This
-     * function should return a server bundle ID which will be used as the
-     * bundle's directory name within the server build directory.
-     */
-    unstable_serverBundles?: ServerBundlesFunction;
-    /**
-     * Enable server-side rendering for your application. Disable to use Remix in
-     * "SPA Mode", which will request the `/` path at build-time and save it as
-     * an `index.html` file with your assets so your application can be deployed
-     * as a SPA without server-rendering. Default's to `true`.
-     */
-    unstable_ssr?: boolean;
-  };
-
-export type ResolvedRemixVitePluginConfig = Pick<
-  ResolvedRemixConfig,
-  | "appDirectory"
-  | "rootDirectory"
-  | "assetsBuildDirectory"
-  | "entryClientFilePath"
-  | "entryServerFilePath"
-  | "future"
-  | "isSpaMode"
-  | "publicPath"
-  | "relativeAssetsBuildDirectory"
-  | "routes"
-  | "serverModuleFormat"
-> & {
-  serverBuildDirectory: string;
-  serverBuildFile: string;
-  serverBundles?: ServerBundlesFunction;
+type BaseBuildManifest = {
+  routes: RouteManifest;
 };
 
-export type ServerBuildConfig = {
+type DefaultBuildManifest = BaseBuildManifest & {
+  serverBundles?: never;
+  routeIdToServerBundleId?: never;
+};
+
+export type ServerBundlesBuildManifest = BaseBuildManifest & {
+  serverBundles: {
+    [serverBundleId: string]: {
+      id: string;
+      file: string;
+    };
+  };
+  routeIdToServerBundleId: Record<string, string>;
+};
+
+export type BuildManifest = DefaultBuildManifest | ServerBundlesBuildManifest;
+
+const excludedRemixConfigPresetKeys = [
+  "presets",
+] as const satisfies ReadonlyArray<keyof VitePluginConfig>;
+
+type ExcludedRemixConfigPresetKey =
+  typeof excludedRemixConfigPresetKeys[number];
+
+type RemixConfigPreset = Omit<VitePluginConfig, ExcludedRemixConfigPresetKey>;
+
+export type Preset = {
+  name: string;
+  remixConfig?: (args: {
+    remixUserConfig: VitePluginConfig;
+  }) => RemixConfigPreset | Promise<RemixConfigPreset>;
+  remixConfigResolved?: (args: {
+    remixConfig: ResolvedVitePluginConfig;
+  }) => void | Promise<void>;
+};
+
+export type VitePluginConfig = SupportedRemixEsbuildUserConfig & {
+  /**
+   * The react router app basename.  Defaults to `"/"`.
+   */
+  basename?: string;
+  /**
+   * The path to the build directory, relative to the project. Defaults to
+   * `"build"`.
+   */
+  buildDirectory?: string;
+  /**
+   * A function that is called after the full Remix build is complete.
+   */
+  buildEnd?: BuildEndHook;
+  /**
+   * Whether to write a `"manifest.json"` file to the build directory.`
+   * Defaults to `false`.
+   */
+  manifest?: boolean;
+  /**
+   * An array of Remix config presets to ease integration with other platforms
+   * and tools.
+   */
+  presets?: Array<Preset>;
+  /**
+   * The file name of the server build output. This file
+   * should end in a `.js` extension and should be deployed to your server.
+   * Defaults to `"index.js"`.
+   */
+  serverBuildFile?: string;
+  /**
+   * A function for assigning routes to different server bundles. This
+   * function should return a server bundle ID which will be used as the
+   * bundle's directory name within the server build directory.
+   */
+  serverBundles?: ServerBundlesFunction;
+  /**
+   * Enable server-side rendering for your application. Disable to use Remix in
+   * "SPA Mode", which will request the `/` path at build-time and save it as
+   * an `index.html` file with your assets so your application can be deployed
+   * as a SPA without server-rendering. Default's to `true`.
+   */
+  ssr?: boolean;
+};
+
+type BuildEndHook = (args: {
+  buildManifest: BuildManifest | undefined;
+  remixConfig: ResolvedVitePluginConfig;
+  viteConfig: Vite.ResolvedConfig;
+}) => void | Promise<void>;
+
+export type ResolvedVitePluginConfig = Readonly<
+  Pick<
+    ResolvedRemixEsbuildConfig,
+    "appDirectory" | "future" | "publicPath" | "routes" | "serverModuleFormat"
+  > & {
+    basename: string;
+    buildDirectory: string;
+    buildEnd?: BuildEndHook;
+    manifest: boolean;
+    publicPath: string; // derived from Vite's `base` config
+    serverBuildFile: string;
+    serverBundles?: ServerBundlesFunction;
+    ssr: boolean;
+  }
+>;
+
+export type ServerBundleBuildConfig = {
   routes: RouteManifest;
-  serverBuildDirectory: string;
+  serverBundleId: string;
+};
+
+type RemixPluginSsrBuildContext =
+  | {
+      isSsrBuild: false;
+      getRemixServerManifest?: never;
+      serverBundleBuildConfig?: never;
+    }
+  | {
+      isSsrBuild: true;
+      getRemixServerManifest: () => Promise<RemixManifest>;
+      serverBundleBuildConfig: ServerBundleBuildConfig | null;
+    };
+
+export type RemixPluginContext = RemixPluginSsrBuildContext & {
+  rootDirectory: string;
+  entryClientFilePath: string;
+  entryServerFilePath: string;
+  remixConfig: ResolvedVitePluginConfig;
+  viteManifestEnabled: boolean;
 };
 
 let serverBuildId = VirtualModule.id("server-build");
 let serverManifestId = VirtualModule.id("server-manifest");
 let browserManifestId = VirtualModule.id("browser-manifest");
-let remixReactProxyId = VirtualModule.id("remix-react-proxy");
 let hmrRuntimeId = VirtualModule.id("hmr-runtime");
 let injectHmrRuntimeId = VirtualModule.id("inject-hmr-runtime");
 
-const isJsFile = (filePath: string) => /\.[cm]?[jt]sx?$/i.test(filePath);
-
 const resolveRelativeRouteFilePath = (
-  route: ConfigRoute,
-  pluginConfig: ResolvedRemixVitePluginConfig
+  route: RouteManifestEntry,
+  remixConfig: ResolvedVitePluginConfig
 ) => {
-  let vite = importViteEsmSync();
+  let vite = getVite();
   let file = route.file;
-  let fullPath = path.resolve(pluginConfig.appDirectory, file);
+  let fullPath = path.resolve(remixConfig.appDirectory, file);
 
   return vite.normalizePath(fullPath);
 };
@@ -172,41 +328,41 @@ const getHash = (source: BinaryLike, maxLength?: number): string => {
 };
 
 const resolveChunk = (
-  pluginConfig: ResolvedRemixVitePluginConfig,
+  ctx: RemixPluginContext,
   viteManifest: Vite.Manifest,
   absoluteFilePath: string
 ) => {
-  let vite = importViteEsmSync();
-  let rootRelativeFilePath = path.relative(
-    pluginConfig.rootDirectory,
-    absoluteFilePath
+  let vite = getVite();
+  let rootRelativeFilePath = vite.normalizePath(
+    path.relative(ctx.rootDirectory, absoluteFilePath)
   );
-  let manifestKey = vite.normalizePath(rootRelativeFilePath);
-  let entryChunk = viteManifest[manifestKey];
+  let entryChunk =
+    viteManifest[rootRelativeFilePath + BUILD_CLIENT_ROUTE_QUERY_STRING] ??
+    viteManifest[rootRelativeFilePath];
 
   if (!entryChunk) {
     let knownManifestKeys = Object.keys(viteManifest)
       .map((key) => '"' + key + '"')
       .join(", ");
     throw new Error(
-      `No manifest entry found for "${manifestKey}". Known manifest keys: ${knownManifestKeys}`
+      `No manifest entry found for "${rootRelativeFilePath}". Known manifest keys: ${knownManifestKeys}`
     );
   }
 
   return entryChunk;
 };
 
-const resolveBuildAssetPaths = (
-  pluginConfig: ResolvedRemixVitePluginConfig,
+const getRemixManifestBuildAssets = (
+  ctx: RemixPluginContext,
   viteManifest: Vite.Manifest,
   entryFilePath: string,
   prependedAssetFilePaths: string[] = []
-): Manifest["entry"] & { css: string[] } => {
-  let entryChunk = resolveChunk(pluginConfig, viteManifest, entryFilePath);
+): RemixManifest["entry"] & { css: string[] } => {
+  let entryChunk = resolveChunk(ctx, viteManifest, entryFilePath);
 
   // This is here to support prepending client entry assets to the root route
   let prependedAssetChunks = prependedAssetFilePaths.map((filePath) =>
-    resolveChunk(pluginConfig, viteManifest, filePath)
+    resolveChunk(ctx, viteManifest, filePath)
   );
 
   let chunks = resolveDependantChunks(viteManifest, [
@@ -215,14 +371,14 @@ const resolveBuildAssetPaths = (
   ]);
 
   return {
-    module: `${pluginConfig.publicPath}${entryChunk.file}`,
+    module: `${ctx.remixConfig.publicPath}${entryChunk.file}`,
     imports:
       dedupe(chunks.flatMap((e) => e.imports ?? [])).map((imported) => {
-        return `${pluginConfig.publicPath}${viteManifest[imported].file}`;
+        return `${ctx.remixConfig.publicPath}${viteManifest[imported].file}`;
       }) ?? [],
     css:
       dedupe(chunks.flatMap((e) => e.css ?? [])).map((href) => {
-        return `${pluginConfig.publicPath}${href}`;
+        return `${ctx.remixConfig.publicPath}${href}`;
       }) ?? [],
   };
 };
@@ -238,13 +394,13 @@ function resolveDependantChunks(
       return;
     }
 
+    chunks.add(chunk);
+
     if (chunk.imports) {
       for (let importKey of chunk.imports) {
         walk(viteManifest[importKey]);
       }
     }
-
-    chunks.add(chunk);
   }
 
   for (let entryChunk of entryChunks) {
@@ -265,13 +421,13 @@ const writeFileSafe = async (file: string, contents: string): Promise<void> => {
 
 const getRouteManifestModuleExports = async (
   viteChildCompiler: Vite.ViteDevServer | null,
-  pluginConfig: ResolvedRemixVitePluginConfig
+  ctx: RemixPluginContext
 ): Promise<Record<string, string[]>> => {
   let entries = await Promise.all(
-    Object.entries(pluginConfig.routes).map(async ([key, route]) => {
+    Object.entries(ctx.remixConfig.routes).map(async ([key, route]) => {
       let sourceExports = await getRouteModuleExports(
         viteChildCompiler,
-        pluginConfig,
+        ctx,
         route.file
       );
       return [key, sourceExports] as const;
@@ -282,8 +438,9 @@ const getRouteManifestModuleExports = async (
 
 const getRouteModuleExports = async (
   viteChildCompiler: Vite.ViteDevServer | null,
-  pluginConfig: ResolvedRemixVitePluginConfig,
-  routeFile: string
+  ctx: RemixPluginContext,
+  routeFile: string,
+  readRouteFile?: () => string | Promise<string>
 ): Promise<string[]> => {
   if (!viteChildCompiler) {
     throw new Error("Vite child compiler not found");
@@ -296,8 +453,9 @@ const getRouteModuleExports = async (
 
   let ssr = true;
   let { pluginContainer, moduleGraph } = viteChildCompiler;
-  let routePath = path.join(pluginConfig.appDirectory, routeFile);
-  let url = resolveFileUrl(pluginConfig, routePath);
+
+  let routePath = path.resolve(ctx.remixConfig.appDirectory, routeFile);
+  let url = resolveFileUrl(ctx, routePath);
 
   let resolveId = async () => {
     let result = await pluginContainer.resolveId(url, undefined, { ssr });
@@ -307,7 +465,7 @@ const getRouteModuleExports = async (
 
   let [id, code] = await Promise.all([
     resolveId(),
-    fse.readFile(routePath, "utf-8"),
+    readRouteFile?.() ?? fse.readFile(routePath, "utf-8"),
     // pluginContainer.transform(...) fails if we don't do this first:
     moduleGraph.ensureEntryFromUrl(url, ssr),
   ]);
@@ -319,43 +477,169 @@ const getRouteModuleExports = async (
   return exportNames;
 };
 
-const getViteMajorVersion = (): number => {
-  let vitePkg = require("vite/package.json");
-  return parseInt(vitePkg.version.split(".")[0]!);
+const getServerBundleBuildConfig = (
+  viteUserConfig: Vite.UserConfig
+): ServerBundleBuildConfig | null => {
+  if (
+    !("__remixServerBundleBuildConfig" in viteUserConfig) ||
+    !viteUserConfig.__remixServerBundleBuildConfig
+  ) {
+    return null;
+  }
+
+  return viteUserConfig.__remixServerBundleBuildConfig as ServerBundleBuildConfig;
 };
 
-export type RemixVitePlugin = (
-  options?: RemixVitePluginOptions
-) => Vite.Plugin[];
-export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
+export let getServerBuildDirectory = (ctx: RemixPluginContext) =>
+  path.join(
+    ctx.remixConfig.buildDirectory,
+    "server",
+    ...(ctx.serverBundleBuildConfig
+      ? [ctx.serverBundleBuildConfig.serverBundleId]
+      : [])
+  );
+
+let getClientBuildDirectory = (remixConfig: ResolvedVitePluginConfig) =>
+  path.join(remixConfig.buildDirectory, "client");
+
+let defaultEntriesDir = path.resolve(__dirname, "..", "config", "defaults");
+let defaultEntries = fse
+  .readdirSync(defaultEntriesDir)
+  .map((filename) => path.join(defaultEntriesDir, filename));
+invariant(defaultEntries.length > 0, "No default entries found");
+
+let mergeRemixConfig = (...configs: VitePluginConfig[]): VitePluginConfig => {
+  let reducer = (
+    configA: VitePluginConfig,
+    configB: VitePluginConfig
+  ): VitePluginConfig => {
+    let mergeRequired = (key: keyof VitePluginConfig) =>
+      configA[key] !== undefined && configB[key] !== undefined;
+
+    return {
+      ...configA,
+      ...configB,
+      ...(mergeRequired("buildEnd")
+        ? {
+            buildEnd: async (...args) => {
+              await Promise.all([
+                configA.buildEnd?.(...args),
+                configB.buildEnd?.(...args),
+              ]);
+            },
+          }
+        : {}),
+      ...(mergeRequired("future")
+        ? {
+            future: {
+              ...configA.future,
+              ...configB.future,
+            },
+          }
+        : {}),
+      ...(mergeRequired("ignoredRouteFiles")
+        ? {
+            ignoredRouteFiles: Array.from(
+              new Set([
+                ...(configA.ignoredRouteFiles ?? []),
+                ...(configB.ignoredRouteFiles ?? []),
+              ])
+            ),
+          }
+        : {}),
+      ...(mergeRequired("presets")
+        ? {
+            presets: [...(configA.presets ?? []), ...(configB.presets ?? [])],
+          }
+        : {}),
+      ...(mergeRequired("routes")
+        ? {
+            routes: async (...args) => {
+              let [routesA, routesB] = await Promise.all([
+                configA.routes?.(...args),
+                configB.routes?.(...args),
+              ]);
+
+              return {
+                ...routesA,
+                ...routesB,
+              };
+            },
+          }
+        : {}),
+    };
+  };
+
+  return configs.reduce(reducer, {});
+};
+
+type MaybePromise<T> = T | Promise<T>;
+
+let remixDevLoadContext: (
+  request: Request
+) => MaybePromise<Record<string, unknown>> = () => ({});
+
+export let setRemixDevLoadContext = (
+  loadContext: (request: Request) => MaybePromise<Record<string, unknown>>
+) => {
+  remixDevLoadContext = loadContext;
+};
+
+// Inlined from https://github.com/jsdf/deep-freeze
+let deepFreeze = (o: any) => {
+  Object.freeze(o);
+  let oIsFunction = typeof o === "function";
+  let hasOwnProp = Object.prototype.hasOwnProperty;
+  Object.getOwnPropertyNames(o).forEach(function (prop) {
+    if (
+      hasOwnProp.call(o, prop) &&
+      (oIsFunction
+        ? prop !== "caller" && prop !== "callee" && prop !== "arguments"
+        : true) &&
+      o[prop] !== null &&
+      (typeof o[prop] === "object" || typeof o[prop] === "function") &&
+      !Object.isFrozen(o[prop])
+    ) {
+      deepFreeze(o[prop]);
+    }
+  });
+  return o;
+};
+
+export type RemixVitePlugin = (config?: VitePluginConfig) => Vite.Plugin[];
+export const remixVitePlugin: RemixVitePlugin = (remixUserConfig = {}) => {
+  // Prevent mutations to the user config
+  remixUserConfig = deepFreeze(remixUserConfig);
+
   let viteCommand: Vite.ResolvedConfig["command"];
   let viteUserConfig: Vite.UserConfig;
+  let viteConfigEnv: Vite.ConfigEnv;
   let viteConfig: Vite.ResolvedConfig | undefined;
-
-  let isViteV4 = getViteMajorVersion() === 4;
-
   let cssModulesManifest: Record<string, string> = {};
-  let ssrBuildContext:
-    | { isSsrBuild: false }
-    | { isSsrBuild: true; getManifest: () => Promise<Manifest> };
-
   let viteChildCompiler: Vite.ViteDevServer | null = null;
-  let cachedPluginConfig: ResolvedRemixVitePluginConfig | undefined;
+  let routesViteNodeContext: ViteNode.Context | null = null;
 
-  let resolveServerBuildConfig = (): ServerBuildConfig | null => {
-    if (
-      !("__remixServerBuildConfig" in viteUserConfig) ||
-      !viteUserConfig.__remixServerBuildConfig
-    ) {
-      return null;
-    }
+  // This is initialized by `updateRemixPluginContext` during Vite's `config`
+  // hook, so most of the code can assume this defined without null check.
+  // During dev, `updateRemixPluginContext` is called again on every config file
+  // change or route file addition/removal.
+  let ctx: RemixPluginContext;
 
-    let { routes, serverBuildDirectory } =
-      viteUserConfig.__remixServerBuildConfig as ServerBuildConfig;
+  /** Mutates `ctx` as a side-effect */
+  let updateRemixPluginContext = async ({
+    routeConfigChanged = false,
+  }: {
+    routeConfigChanged?: boolean;
+  } = {}): Promise<void> => {
+    let remixConfigPresets: VitePluginConfig[] = (
+      await Promise.all(
+        (remixUserConfig.presets ?? []).map(async (preset) => {
+          if (!preset.name) {
+            throw new Error(
+              "Remix presets must have a `name` property defined."
+            );
+          }
 
-    // Ensure extra config values can't sneak through
-    return { routes, serverBuildDirectory };
-  };
 
   let resolvePluginConfig =
     async (): Promise<ResolvedRemixVitePluginConfig> => {
@@ -379,99 +663,194 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
         ...extraConfig,
       };
 
-      let rootDirectory =
-        viteUserConfig.root ?? process.env.REMIX_ROOT ?? process.cwd();
+          if (!preset.remixConfig) {
+            return null;
+          }
 
-      let isSpaMode = pluginConfig.unstable_ssr === false;
 
-      let resolvedRemixConfig = await resolveConfig(
-        pick(pluginConfig, supportedRemixConfigKeys),
-        {
-          rootDirectory,
-          isSpaMode,
-        }
-      );
+          let remixConfigPreset: VitePluginConfig = omit(
+            await preset.remixConfig({ remixUserConfig }),
+            excludedRemixConfigPresetKeys
+          );
 
-      // Only select the Remix config options that the Vite plugin uses
-      let {
-        appDirectory,
-        assetsBuildDirectory,
-        entryClientFilePath,
-        publicPath,
-        routes,
-        entryServerFilePath,
-        serverBuildDirectory,
-        serverBuildFile,
-        unstable_serverBundles,
-        serverModuleFormat,
-        relativeAssetsBuildDirectory,
-        future,
-      } = {
-        ...pluginConfig,
-        ...resolvedRemixConfig,
-        ...resolveServerBuildConfig(),
-      };
+          return remixConfigPreset;
+        })
+      )
+    ).filter(function isNotNull<T>(value: T | null): value is T {
+      return value !== null;
+    });
 
-      // Log warning for incompatible vite config flags
-      if (isSpaMode && unstable_serverBundles) {
-        console.warn(
-          colors.yellow(
-            colors.bold("⚠️  SPA Mode: ") +
-              "the `unstable_serverBundles` config is invalid with " +
-              "`unstable_ssr:false` and will be ignored`"
-          )
-        );
-        unstable_serverBundles = undefined;
-      }
+    let defaults = {
+      basename: "/",
+      buildDirectory: "build",
+      manifest: false,
+      serverBuildFile: "index.js",
+      ssr: true,
+    } as const satisfies Partial<VitePluginConfig>;
 
-      return {
-        appDirectory,
-        rootDirectory,
-        assetsBuildDirectory,
-        entryClientFilePath,
-        publicPath,
-        routes,
-        entryServerFilePath,
-        serverBuildDirectory,
-        serverBuildFile,
-        serverBundles: unstable_serverBundles,
-        serverModuleFormat,
-        isSpaMode,
-        relativeAssetsBuildDirectory,
-        future,
-      };
+    let resolvedRemixUserConfig = {
+      ...defaults, // Default values should be completely overridden by user/preset config, not merged
+      ...mergeRemixConfig(...remixConfigPresets, remixUserConfig),
     };
 
+    let rootDirectory =
+      viteUserConfig.root ?? process.env.REMIX_ROOT ?? process.cwd();
+
+    let { basename, buildEnd, manifest, ssr } = resolvedRemixUserConfig;
+    let isSpaMode = !ssr;
+
+    // Only select the Remix esbuild config options that the Vite plugin uses
+    invariant(routesViteNodeContext);
+    let {
+      appDirectory,
+      entryClientFilePath,
+      entryServerFilePath,
+      future,
+      routes,
+      serverModuleFormat,
+    } = await resolveCommonConfig(
+      pick(resolvedRemixUserConfig, supportedRemixEsbuildConfigKeys),
+      {
+        rootDirectory,
+        isSpaMode,
+        vite: getVite(),
+        routeConfigChanged,
+        viteUserConfig,
+        routesViteNodeContext,
+      }
+    );
+
+    let buildDirectory = path.resolve(
+      rootDirectory,
+      resolvedRemixUserConfig.buildDirectory
+    );
+
+    let { serverBuildFile, serverBundles } = resolvedRemixUserConfig;
+
+    let publicPath = viteUserConfig.base ?? "/";
+
+    if (
+      basename !== "/" &&
+      viteCommand === "serve" &&
+      !viteUserConfig.server?.middlewareMode &&
+      !basename.startsWith(publicPath)
+    ) {
+      throw new Error(
+        "When using the Remix `basename` and the Vite `base` config, " +
+          "the `basename` config must begin with `base` for the default " +
+          "Vite dev server."
+      );
+    }
+
+    // Log warning for incompatible vite config flags
+    if (isSpaMode && serverBundles) {
+      console.warn(
+        colors.yellow(
+          colors.bold("⚠️  SPA Mode: ") +
+            "the `serverBundles` config is invalid with " +
+            "`ssr:false` and will be ignored`"
+        )
+      );
+      serverBundles = undefined;
+    }
+
+    let remixConfig: ResolvedVitePluginConfig = deepFreeze({
+      appDirectory,
+      basename,
+      buildDirectory,
+      buildEnd,
+      future,
+      manifest,
+      publicPath,
+      routes,
+      serverBuildFile,
+      serverBundles,
+      serverModuleFormat,
+      ssr,
+    });
+
+    for (let preset of remixUserConfig.presets ?? []) {
+      await preset.remixConfigResolved?.({ remixConfig });
+    }
+
+    let viteManifestEnabled = viteUserConfig.build?.manifest === true;
+
+    let ssrBuildCtx: RemixPluginSsrBuildContext =
+      viteConfigEnv.isSsrBuild && viteCommand === "build"
+        ? {
+            isSsrBuild: true,
+            getRemixServerManifest: async () =>
+              (await generateRemixManifestsForBuild()).remixServerManifest,
+            serverBundleBuildConfig: getServerBundleBuildConfig(viteUserConfig),
+          }
+        : { isSsrBuild: false };
+
+    ctx = {
+      remixConfig,
+      rootDirectory,
+      entryClientFilePath,
+      entryServerFilePath,
+      viteManifestEnabled,
+      ...ssrBuildCtx,
+    };
+  };
+
+  let pluginIndex = (pluginName: string) => {
+    invariant(viteConfig);
+    return viteConfig.plugins.findIndex((plugin) => plugin.name === pluginName);
+  };
+
   let getServerEntry = async () => {
-    let pluginConfig = await resolvePluginConfig();
+    invariant(viteConfig, "viteconfig required to generate the server entry");
+
+    // v3 TODO:
+    // - Deprecate `ServerBuild.mode` once we officially stabilize vite and
+    //   mark the old compiler as deprecated
+    // - Remove `ServerBuild.mode` in v3
+
+    let routes = ctx.serverBundleBuildConfig
+      ? // For server bundle builds, the server build should only import the
+        // routes for this bundle rather than importing all routes
+        ctx.serverBundleBuildConfig.routes
+      : // Otherwise, all routes are imported as usual
+        ctx.remixConfig.routes;
 
     return `
     import * as entryServer from ${JSON.stringify(
-      resolveFileUrl(pluginConfig, pluginConfig.entryServerFilePath)
+      resolveFileUrl(ctx, ctx.entryServerFilePath)
     )};
-    ${Object.keys(pluginConfig.routes)
+    ${Object.keys(routes)
       .map((key, index) => {
-        let route = pluginConfig.routes[key]!;
+        let route = routes[key]!;
         return `import * as route${index} from ${JSON.stringify(
           resolveFileUrl(
-            pluginConfig,
-            resolveRelativeRouteFilePath(route, pluginConfig)
+            ctx,
+            resolveRelativeRouteFilePath(route, ctx.remixConfig)
           )
         )};`;
       })
       .join("\n")}
+      /**
+       * \`mode\` is only relevant for the old Remix compiler but
+       * is included here to satisfy the \`ServerBuild\` typings.
+       */
+      export const mode = ${JSON.stringify(viteConfig.mode)};
       export { default as assets } from ${JSON.stringify(serverManifestId)};
       export const assetsBuildDirectory = ${JSON.stringify(
-        pluginConfig.relativeAssetsBuildDirectory
+        path.relative(
+          ctx.rootDirectory,
+          getClientBuildDirectory(ctx.remixConfig)
+        )
       )};
-      export const future = ${JSON.stringify(pluginConfig.future)};
-      export const isSpaMode = ${pluginConfig.isSpaMode === true};
-      export const publicPath = ${JSON.stringify(pluginConfig.publicPath)};
+      export const basename = ${JSON.stringify(ctx.remixConfig.basename)};
+      export const future = ${JSON.stringify(ctx.remixConfig.future)};
+      export const isSpaMode = ${!ctx.remixConfig.ssr};
+      export const publicPath = ${JSON.stringify(ctx.remixConfig.publicPath)};
       export const entry = { module: entryServer };
       export const routes = {
-        ${Object.keys(pluginConfig.routes)
+        ${Object.keys(routes)
           .map((key, index) => {
-            let route = pluginConfig.routes[key]!;
+            let route = routes[key]!;
             return `${JSON.stringify(key)}: {
           id: ${JSON.stringify(route.id)},
           parentId: ${JSON.stringify(route.parentId)},
@@ -486,42 +865,59 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
   };
 
   let loadViteManifest = async (directory: string) => {
-    let manifestPath = isViteV4
-      ? "manifest.json"
-      : path.join(".vite", "manifest.json");
     let manifestContents = await fse.readFile(
-      path.resolve(directory, manifestPath),
+      path.resolve(directory, ".vite", "manifest.json"),
       "utf-8"
     );
     return JSON.parse(manifestContents) as Vite.Manifest;
   };
 
-  let createBuildManifest = async (): Promise<Manifest> => {
-    let pluginConfig = await resolvePluginConfig();
+  let getViteManifestAssetPaths = (
+    viteManifest: Vite.Manifest
+  ): Set<string> => {
+    // Get .css?url imports and CSS entry points
+    let cssUrlPaths = Object.values(viteManifest)
+      .filter((chunk) => chunk.file.endsWith(".css"))
+      .map((chunk) => chunk.file);
+
+    // Get bundled CSS files and generic asset types
+    let chunkAssetPaths = Object.values(viteManifest).flatMap(
+      (chunk) => chunk.assets ?? []
+    );
+
+    return new Set([...cssUrlPaths, ...chunkAssetPaths]);
+  };
+
+  let generateRemixManifestsForBuild = async (): Promise<{
+    remixBrowserManifest: RemixManifest;
+    remixServerManifest: RemixManifest;
+  }> => {
+    invariant(viteConfig);
 
     let viteManifest = await loadViteManifest(
-      pluginConfig.assetsBuildDirectory
+      getClientBuildDirectory(ctx.remixConfig)
     );
 
-    let entry = resolveBuildAssetPaths(
-      pluginConfig,
+    let entry = getRemixManifestBuildAssets(
+      ctx,
       viteManifest,
-      pluginConfig.entryClientFilePath
+      ctx.entryClientFilePath
     );
 
-    let routes: Manifest["routes"] = {};
+    let browserRoutes: RemixManifest["routes"] = {};
+    let serverRoutes: RemixManifest["routes"] = {};
 
     let routeManifestExports = await getRouteManifestModuleExports(
       viteChildCompiler,
-      pluginConfig
+      ctx
     );
 
-    for (let [key, route] of Object.entries(pluginConfig.routes)) {
-      let routeFilePath = path.join(pluginConfig.appDirectory, route.file);
+    for (let [key, route] of Object.entries(ctx.remixConfig.routes)) {
+      let routeFilePath = path.join(ctx.remixConfig.appDirectory, route.file);
       let sourceExports = routeManifestExports[key];
       let isRootRoute = route.parentId === undefined;
 
-      routes[key] = {
+      let routeManifestEntry = {
         id: route.id,
         parentId: route.parentId,
         path: route.path,
@@ -532,47 +928,69 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
         hasClientAction: sourceExports.includes("clientAction"),
         hasClientLoader: sourceExports.includes("clientLoader"),
         hasErrorBoundary: sourceExports.includes("ErrorBoundary"),
-        ...resolveBuildAssetPaths(
-          pluginConfig,
+        ...getRemixManifestBuildAssets(
+          ctx,
           viteManifest,
           routeFilePath,
           // If this is the root route, we also need to include assets from the
           // client entry file as this is a common way for consumers to import
           // global reset styles, etc.
-          isRootRoute ? [pluginConfig.entryClientFilePath] : []
+          isRootRoute ? [ctx.entryClientFilePath] : []
         ),
       };
+
+      browserRoutes[key] = routeManifestEntry;
+
+      let serverBundleRoutes = ctx.serverBundleBuildConfig?.routes;
+      if (!serverBundleRoutes || serverBundleRoutes[key]) {
+        serverRoutes[key] = routeManifestEntry;
+      }
     }
 
-    let fingerprintedValues = { entry, routes };
+    let fingerprintedValues = { entry, routes: browserRoutes };
     let version = getHash(JSON.stringify(fingerprintedValues), 8);
-    let manifestPath = `assets/manifest-${version}.js`;
-    let url = `${pluginConfig.publicPath}${manifestPath}`;
+    let manifestPath = path.posix.join(
+      viteConfig.build.assetsDir,
+      `manifest-${version}.js`
+    );
+    let url = `${ctx.remixConfig.publicPath}${manifestPath}`;
     let nonFingerprintedValues = { url, version };
 
-    let manifest: Manifest = {
+    let remixBrowserManifest: RemixManifest = {
       ...fingerprintedValues,
       ...nonFingerprintedValues,
     };
 
+    // Write the browser manifest to disk as part of the build process
     await writeFileSafe(
-      path.join(pluginConfig.assetsBuildDirectory, manifestPath),
-      `window.__remixManifest=${JSON.stringify(manifest)};`
+      path.join(getClientBuildDirectory(ctx.remixConfig), manifestPath),
+      `window.__remixManifest=${JSON.stringify(remixBrowserManifest)};`
     );
 
-    return manifest;
+    // The server manifest is the same as the browser manifest, except for
+    // server bundle builds which only includes routes for the current bundle,
+    // otherwise the server and client have the same routes
+    let remixServerManifest: RemixManifest = {
+      ...remixBrowserManifest,
+      routes: serverRoutes,
+    };
+
+    return {
+      remixBrowserManifest,
+      remixServerManifest,
+    };
   };
 
-  let getDevManifest = async (): Promise<Manifest> => {
-    let pluginConfig = await resolvePluginConfig();
-    let routes: Manifest["routes"] = {};
+  // In dev, the server and browser Remix manifests are the same
+  let getRemixManifestForDev = async (): Promise<RemixManifest> => {
+    let routes: RemixManifest["routes"] = {};
 
     let routeManifestExports = await getRouteManifestModuleExports(
       viteChildCompiler,
-      pluginConfig
+      ctx
     );
 
-    for (let [key, route] of Object.entries(pluginConfig.routes)) {
+    for (let [key, route] of Object.entries(ctx.remixConfig.routes)) {
       let sourceExports = routeManifestExports[key];
       routes[key] = {
         id: route.id,
@@ -580,12 +998,13 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
         path: route.path,
         index: route.index,
         caseSensitive: route.caseSensitive,
-        module: `${resolveFileUrl(
-          pluginConfig,
-          resolveRelativeRouteFilePath(route, pluginConfig)
-        )}${
-          isJsFile(route.file) ? "" : "?import" // Ensure the Vite dev server responds with a JS module
-        }`,
+        module: combineURLs(
+          ctx.remixConfig.publicPath,
+          `${resolveFileUrl(
+            ctx,
+            resolveRelativeRouteFilePath(route, ctx.remixConfig)
+          )}`
+        ),
         hasAction: sourceExports.includes("action"),
         hasLoader: sourceExports.includes("loader"),
         hasClientAction: sourceExports.includes("clientAction"),
@@ -597,12 +1016,21 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
 
     return {
       version: String(Math.random()),
-      url: VirtualModule.url(browserManifestId),
+      url: combineURLs(
+        ctx.remixConfig.publicPath,
+        VirtualModule.url(browserManifestId)
+      ),
       hmr: {
-        runtime: VirtualModule.url(injectHmrRuntimeId),
+        runtime: combineURLs(
+          ctx.remixConfig.publicPath,
+          VirtualModule.url(injectHmrRuntimeId)
+        ),
       },
       entry: {
-        module: resolveFileUrl(pluginConfig, pluginConfig.entryClientFilePath),
+        module: combineURLs(
+          ctx.remixConfig.publicPath,
+          resolveFileUrl(ctx, ctx.entryClientFilePath)
+        ),
         imports: [],
       },
       routes,
@@ -612,24 +1040,29 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
   return [
     {
       name: "remix",
-      config: async (_viteUserConfig, viteConfigEnv) => {
+      config: async (_viteUserConfig, _viteConfigEnv) => {
         // Preload Vite's ESM build up-front as soon as we're in an async context
-        await preloadViteEsm();
+        await preloadVite();
 
         // Ensure sync import of Vite works after async preload
-        let vite = importViteEsmSync();
+        let vite = getVite();
 
         viteUserConfig = _viteUserConfig;
+        viteConfigEnv = _viteConfigEnv;
         viteCommand = viteConfigEnv.command;
 
-        let pluginConfig = await resolvePluginConfig();
-        cachedPluginConfig = pluginConfig;
+        routesViteNodeContext = await ViteNode.createContext({
+          root: viteUserConfig.root,
+          mode: viteConfigEnv.mode,
+        });
+
+        await updateRemixPluginContext();
 
         Object.assign(
           process.env,
           vite.loadEnv(
             viteConfigEnv.mode,
-            pluginConfig.rootDirectory,
+            ctx.rootDirectory,
             // We override default prefix of "VITE_" with a blank string since
             // we're targeting the server, so we want to load all environment
             // variables, not just those explicitly marked for the client
@@ -637,17 +1070,48 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
           )
         );
 
-        let isSsrBuild =
-          "ssrBuild" in viteConfigEnv &&
-          typeof viteConfigEnv.ssrBuild === "boolean"
-            ? viteConfigEnv.ssrBuild // Vite v4 back compat
-            : viteConfigEnv.isSsrBuild;
+        let baseRollupOptions = {
+          // Silence Rollup "use client" warnings
+          // Adapted from https://github.com/vitejs/vite-plugin-react/pull/144
+          onwarn(warning, defaultHandler) {
+            if (
+              warning.code === "MODULE_LEVEL_DIRECTIVE" &&
+              warning.message.includes("use client")
+            ) {
+              return;
+            }
+            if (viteUserConfig.build?.rollupOptions?.onwarn) {
+              viteUserConfig.build.rollupOptions.onwarn(
+                warning,
+                defaultHandler
+              );
+            } else {
+              defaultHandler(warning);
+            }
+          },
+        } satisfies Vite.BuildOptions["rollupOptions"];
 
         return {
-          __remixPluginResolvedConfig: pluginConfig,
-          appType: "custom",
-          experimental: { hmrPartialAccept: true },
+          __remixPluginContext: ctx,
+          appType:
+            viteCommand === "serve" &&
+            viteConfigEnv.mode === "production" &&
+            ctx.remixConfig.ssr === false
+              ? "spa"
+              : "custom",
+
+          ssr: {
+            external: ssrExternals,
+          },
           optimizeDeps: {
+            entries: ctx.remixConfig.future.unstable_optimizeDeps
+              ? [
+                  ctx.entryClientFilePath,
+                  ...Object.values(ctx.remixConfig.routes).map((route) =>
+                    path.join(ctx.remixConfig.appDirectory, route.file)
+                  ),
+                ]
+              : [],
             include: [
               // Pre-bundle React dependencies to avoid React duplicates,
               // even if React dependencies are not direct dependencies.
@@ -663,13 +1127,6 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
               // That means that before Vite pre-bundles dependencies (e.g. first time dev server is run)
               // mismatching Remix routers cause `Error: You must render this element inside a <Remix> element`.
               "@remix-run/react",
-
-              // For some reason, the `vite-dotenv` integration test consistently fails on webkit
-              // with `504 (Outdated Optimize Dep)` from Vite  unless `@remix-run/node` is included
-              // in `optimizeDeps.include`. 🤷
-              // This could be caused by how we copy `node_modules/` into integration test fixtures,
-              // so maybe this will be unnecessary once we switch to pnpm
-              "@remix-run/node",
             ],
           },
           esbuild: {
@@ -686,58 +1143,81 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
               "@remix-run/react",
             ],
           },
-          ...(viteCommand === "build" && {
-            base: pluginConfig.publicPath,
-            build: {
-              ...viteUserConfig.build,
-              ...(!isSsrBuild
-                ? {
-                    manifest: true,
-                    outDir: pluginConfig.assetsBuildDirectory,
-                    rollupOptions: {
-                      ...viteUserConfig.build?.rollupOptions,
-                      preserveEntrySignatures: "exports-only",
-                      input: [
-                        pluginConfig.entryClientFilePath,
-                        ...Object.values(pluginConfig.routes).map((route) =>
-                          path.resolve(pluginConfig.appDirectory, route.file)
-                        ),
-                      ],
-                    },
-                  }
-                : {
-                    // We move SSR-only assets to client assets. Note that the
-                    // SSR build can also emit code-split JS files (e.g. by
-                    // dynamic import) under the same assets directory
-                    // regardless of "ssrEmitAssets" option, so we also need to
-                    // keep these JS files have to be kept as-is.
-                    ssrEmitAssets: true,
-                    copyPublicDir: false, // Assets in the public directory are only used by the client
-                    manifest: true, // We need the manifest to detect SSR-only assets
-                    outDir: pluginConfig.serverBuildDirectory,
-                    rollupOptions: {
-                      ...viteUserConfig.build?.rollupOptions,
-                      preserveEntrySignatures: "exports-only",
-                      input: serverBuildId,
-                      output: {
-                        entryFileNames: pluginConfig.serverBuildFile,
-                        format: pluginConfig.serverModuleFormat,
-                      },
-                    },
-                  }),
-            },
-          }),
+          base: viteUserConfig.base,
+
+          // When consumer provides an allow list for files that can be read by
+          // the server, ensure that Remix's default entry files are included.
+          // If we don't do this and a default entry file is used, the server
+          // will throw an error that the file is not allowed to be read.
+          // https://vitejs.dev/config/server-options#server-fs-allow
+          server: viteUserConfig.server?.fs?.allow
+            ? { fs: { allow: defaultEntries } }
+            : undefined,
+
+          // Vite config options for building
+          ...(viteCommand === "build"
+            ? {
+                build: {
+                  cssMinify: viteUserConfig.build?.cssMinify ?? true,
+                  ...(!viteConfigEnv.isSsrBuild
+                    ? {
+                        manifest: true,
+                        outDir: getClientBuildDirectory(ctx.remixConfig),
+                        rollupOptions: {
+                          ...baseRollupOptions,
+                          preserveEntrySignatures: "exports-only",
+                          input: [
+                            ctx.entryClientFilePath,
+                            ...Object.values(ctx.remixConfig.routes).map(
+                              (route) =>
+                                `${path.resolve(
+                                  ctx.remixConfig.appDirectory,
+                                  route.file
+                                )}${BUILD_CLIENT_ROUTE_QUERY_STRING}`
+                            ),
+                          ],
+                        },
+                      }
+                    : {
+                        // We move SSR-only assets to client assets. Note that the
+                        // SSR build can also emit code-split JS files (e.g. by
+                        // dynamic import) under the same assets directory
+                        // regardless of "ssrEmitAssets" option, so we also need to
+                        // keep these JS files have to be kept as-is.
+                        ssrEmitAssets: true,
+                        copyPublicDir: false, // Assets in the public directory are only used by the client
+                        manifest: true, // We need the manifest to detect SSR-only assets
+                        outDir: getServerBuildDirectory(ctx),
+                        rollupOptions: {
+                          ...baseRollupOptions,
+                          preserveEntrySignatures: "exports-only",
+                          input: serverBuildId,
+                          output: {
+                            entryFileNames: ctx.remixConfig.serverBuildFile,
+                            format: ctx.remixConfig.serverModuleFormat,
+                          },
+                        },
+                      }),
+                },
+              }
+            : undefined),
+
+          // Vite config options for SPA preview mode
+          ...(viteCommand === "serve" && ctx.remixConfig.ssr === false
+            ? {
+                build: {
+                  manifest: true,
+                  outDir: getClientBuildDirectory(ctx.remixConfig),
+                },
+              }
+            : undefined),
         };
       },
       async configResolved(resolvedViteConfig) {
         await initEsModuleLexer;
 
         viteConfig = resolvedViteConfig;
-
-        ssrBuildContext =
-          viteConfig.build.ssr && viteCommand === "build"
-            ? { isSsrBuild: true, getManifest: createBuildManifest }
-            : { isSsrBuild: false };
+        invariant(viteConfig);
 
         // We load the same Vite config file again for the child compiler so
         // that both parent and child compiler's plugins have independent state.
@@ -753,15 +1233,13 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
           );
         }
 
-        let vite = importViteEsmSync();
+        let vite = getVite();
 
         let childCompilerConfigFile = await vite.loadConfigFromFile(
           {
             command: viteConfig.command,
             mode: viteConfig.mode,
-            ...(isViteV4
-              ? { ssrBuild: ssrBuildContext.isSsrBuild }
-              : { isSsrBuild: ssrBuildContext.isSsrBuild }),
+            isSsrBuild: ctx.isSsrBuild,
           },
           viteConfig.configFile
         );
@@ -770,6 +1248,22 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
           childCompilerConfigFile,
           "Vite config file was unable to be resolved for Remix child compiler"
         );
+
+        // Validate that commonly used Rollup plugins that need to run before
+        // Remix are in the correct order. This is because Rollup plugins can't
+        // set `enforce: "pre"` like Vite plugins can. Explicitly validating
+        // this provides a much nicer developer experience.
+        let rollupPrePlugins = [
+          { pluginName: "@mdx-js/rollup", displayName: "@mdx-js/rollup" },
+        ];
+        for (let prePlugin of rollupPrePlugins) {
+          let prePluginIndex = pluginIndex(prePlugin.pluginName);
+          if (prePluginIndex >= 0 && prePluginIndex > pluginIndex("remix")) {
+            throw new Error(
+              `The "${prePlugin.displayName}" plugin should be placed before the Remix plugin in your Vite config file`
+            );
+          }
+        }
 
         viteChildCompiler = await vite.createServer({
           ...viteUserConfig,
@@ -803,9 +1297,25 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
         });
         await viteChildCompiler.pluginContainer.buildStart({});
       },
-      transform(code, id) {
+      async transform(code, id) {
         if (isCssModulesFile(id)) {
           cssModulesManifest[id] = code;
+        }
+
+        if (id.endsWith(BUILD_CLIENT_ROUTE_QUERY_STRING)) {
+          let routeModuleId = id.replace(BUILD_CLIENT_ROUTE_QUERY_STRING, "");
+          let sourceExports = await getRouteModuleExports(
+            viteChildCompiler,
+            ctx,
+            routeModuleId
+          );
+
+          let routeFileName = path.basename(routeModuleId);
+          let clientExports = sourceExports
+            .filter((exportName) => CLIENT_ROUTE_EXPORTS.includes(exportName))
+            .join(", ");
+
+          return `export { ${clientExports} } from "./${routeFileName}";`;
         }
       },
       buildStart() {
@@ -836,19 +1346,20 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
           );
         }
       },
-      configureServer(viteDevServer) {
+      async configureServer(viteDevServer) {
         setDevServerHooks({
           // Give the request handler access to the critical CSS in dev to avoid a
           // flash of unstyled content since Vite injects CSS file contents via JS
           getCriticalCss: async (build, url) => {
-            invariant(cachedPluginConfig);
-            return getStylesForUrl(
+            return getStylesForUrl({
+              rootDirectory: ctx.rootDirectory,
+              entryClientFilePath: ctx.entryClientFilePath,
+              remixConfig: ctx.remixConfig,
               viteDevServer,
-              cachedPluginConfig,
               cssModulesManifest,
               build,
-              url
-            );
+              url,
+            });
           },
           // If an error is caught within the request handler, let Vite fix the
           // stack trace so it maps back to the actual source code
@@ -859,32 +1370,47 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
           },
         });
 
-        // We cache the pluginConfig here to make sure we're only invalidating virtual modules when necessary.
-        // This requires a separate cache from `cachedPluginConfig`, which is updated by remix-hmr-updates. If
-        // we shared the cache, it would already be refreshed by remix-hmr-updates at this point, and we'd
-        // have no way of comparing against the cache to know if the virtual modules need to be invalidated.
-        let previousPluginConfig: ResolvedRemixVitePluginConfig | undefined;
+        // Invalidate virtual modules and update cached plugin config via file watcher
+        viteDevServer.watcher.on("all", async (eventName, rawFilepath) => {
+          let { normalizePath } = getVite();
+          let filepath = normalizePath(rawFilepath);
+
+          let appFileAddedOrRemoved =
+            (eventName === "add" || eventName === "unlink") &&
+            filepath.startsWith(normalizePath(ctx.remixConfig.appDirectory));
+
+          invariant(viteConfig?.configFile);
+          let viteConfigChanged =
+            eventName === "change" &&
+            filepath === normalizePath(viteConfig.configFile);
+
+          let routeConfigChanged = Boolean(
+            routesViteNodeContext?.devServer?.moduleGraph.getModuleById(
+              filepath
+            )
+          );
+
+          if (routeConfigChanged || appFileAddedOrRemoved) {
+            routesViteNodeContext?.devServer?.moduleGraph.invalidateAll();
+            routesViteNodeContext?.runner?.moduleCache.clear();
+          }
+
+          if (
+            appFileAddedOrRemoved ||
+            viteConfigChanged ||
+            routeConfigChanged
+          ) {
+            let lastRemixConfig = ctx.remixConfig;
+
+            await updateRemixPluginContext({ routeConfigChanged });
+
+            if (!isEqualJson(lastRemixConfig, ctx.remixConfig)) {
+              invalidateVirtualModules(viteDevServer);
+            }
+          }
+        });
 
         return () => {
-          viteDevServer.middlewares.use(async (_req, _res, next) => {
-            try {
-              let pluginConfig = await resolvePluginConfig();
-
-              if (
-                JSON.stringify(pluginConfig) !==
-                JSON.stringify(previousPluginConfig)
-              ) {
-                previousPluginConfig = pluginConfig;
-
-                invalidateVirtualModules(viteDevServer);
-              }
-
-              next();
-            } catch (error) {
-              next(error);
-            }
-          });
-
           // Let user servers handle SSR requests in middleware mode,
           // otherwise the Vite plugin will handle the request
           if (!viteDevServer.config.server.middlewareMode) {
@@ -894,11 +1420,16 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
                   serverBuildId
                 )) as ServerBuild;
 
-                let handle = createRequestHandler(build, {
-                  mode: "development",
-                });
-
-                await handle(req, res);
+                let handler = createRequestHandler(build, "development");
+                let nodeHandler: NodeRequestHandler = async (
+                  nodeReq,
+                  nodeRes
+                ) => {
+                  let req = fromNodeRequest(nodeReq, nodeRes);
+                  let res = await handler(req, await remixDevLoadContext(req));
+                  await toNodeRequest(res, nodeRes);
+                };
+                await nodeHandler(req, res);
               } catch (error) {
                 next(error);
               }
@@ -910,34 +1441,17 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
         // After the SSR build is finished, we inspect the Vite manifest for
         // the SSR build and move server-only assets to client assets directory
         async handler() {
-          if (!ssrBuildContext.isSsrBuild) {
+          if (!ctx.isSsrBuild) {
             return;
           }
 
-          invariant(cachedPluginConfig);
           invariant(viteConfig);
 
-          let {
-            assetsBuildDirectory,
-            serverBuildDirectory,
-            serverBuildFile,
-            rootDirectory,
-          } = cachedPluginConfig;
+          let clientBuildDirectory = getClientBuildDirectory(ctx.remixConfig);
+          let serverBuildDirectory = getServerBuildDirectory(ctx);
 
           let ssrViteManifest = await loadViteManifest(serverBuildDirectory);
-          let clientViteManifest = await loadViteManifest(assetsBuildDirectory);
-
-          let clientAssetPaths = new Set(
-            Object.values(clientViteManifest).flatMap(
-              (chunk) => chunk.assets ?? []
-            )
-          );
-
-          let ssrAssetPaths = new Set(
-            Object.values(ssrViteManifest).flatMap(
-              (chunk) => chunk.assets ?? []
-            )
-          );
+          let ssrAssetPaths = getViteManifestAssetPaths(ssrViteManifest);
 
           // We only move assets that aren't in the client build, otherwise we
           // remove them. These assets only exist because we explicitly set
@@ -948,8 +1462,9 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
           let movedAssetPaths: string[] = [];
           for (let ssrAssetPath of ssrAssetPaths) {
             let src = path.join(serverBuildDirectory, ssrAssetPath);
-            if (!clientAssetPaths.has(ssrAssetPath)) {
-              let dest = path.join(assetsBuildDirectory, ssrAssetPath);
+            let dest = path.join(clientBuildDirectory, ssrAssetPath);
+
+            if (!fse.existsSync(dest)) {
               await fse.move(src, dest);
               movedAssetPaths.push(dest);
             } else {
@@ -957,7 +1472,7 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
             }
           }
 
-          // We assume CSS files from the SSR build are unnecessary and remove
+          // We assume CSS assets from the SSR build are unnecessary and remove
           // them for the same reasons as above.
           let ssrCssPaths = Object.values(ssrViteManifest).flatMap(
             (chunk) => chunk.css ?? []
@@ -976,25 +1491,27 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
                   movedAssetPaths.length > 1 ? "s" : ""
                 } moved from Remix server build to client assets.`,
                 ...movedAssetPaths.map((movedAssetPath) =>
-                  colors.dim(path.relative(rootDirectory, movedAssetPath))
+                  colors.dim(path.relative(ctx.rootDirectory, movedAssetPath))
                 ),
                 "",
               ].join("\n")
             );
           }
 
-          if (cachedPluginConfig.isSpaMode) {
+          if (!ctx.remixConfig.ssr) {
             await handleSpaMode(
-              path.join(rootDirectory, serverBuildDirectory),
-              serverBuildFile,
-              assetsBuildDirectory,
-              viteConfig
+              serverBuildDirectory,
+              ctx.remixConfig.serverBuildFile,
+              clientBuildDirectory,
+              viteConfig,
+              ctx.remixConfig.basename
             );
           }
         },
       },
       async buildEnd() {
         await viteChildCompiler?.close();
+        await routesViteNodeContext?.devServer.close();
       },
     },
     {
@@ -1009,20 +1526,21 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
             return await getServerEntry();
           }
           case VirtualModule.resolve(serverManifestId): {
-            let manifest = ssrBuildContext.isSsrBuild
-              ? await ssrBuildContext.getManifest()
-              : await getDevManifest();
+            let remixManifest = ctx.isSsrBuild
+              ? await ctx.getRemixServerManifest()
+              : await getRemixManifestForDev();
 
-            return `export default ${jsesc(manifest, { es6: true })};`;
+            return `export default ${jsesc(remixManifest, { es6: true })};`;
           }
           case VirtualModule.resolve(browserManifestId): {
             if (viteCommand === "build") {
               throw new Error("This module only exists in development");
             }
 
-            let manifest = await getDevManifest();
+            let remixManifest = await getRemixManifestForDev();
+            let remixManifestString = jsesc(remixManifest, { es6: true });
 
-            return `window.__remixManifest=${jsesc(manifest, { es6: true })};`;
+            return `window.__remixManifest=${remixManifestString};`;
           }
         }
       },
@@ -1031,7 +1549,12 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
       name: "remix-dot-server",
       enforce: "pre",
       async resolveId(id, importer, options) {
-        if (options?.ssr) return;
+        // https://vitejs.dev/config/dep-optimization-options
+        let isOptimizeDeps =
+          viteCommand === "serve" &&
+          (options as { scan?: boolean })?.scan === true;
+
+        if (options?.ssr || isOptimizeDeps) return;
 
         let isResolving = options?.custom?.["remix-dot-server"] ?? false;
         if (isResolving) return;
@@ -1053,15 +1576,14 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
           return;
         }
 
-        let vite = importViteEsmSync();
-        let pluginConfig = await resolvePluginConfig();
+        let vite = getVite();
         let importerShort = vite.normalizePath(
-          path.relative(pluginConfig.rootDirectory, importer)
+          path.relative(ctx.rootDirectory, importer)
         );
-        let isRoute = getRoute(pluginConfig, importer);
+        let isRoute = getRoute(ctx.remixConfig, importer);
 
         if (isRoute) {
-          let serverOnlyExports = SERVER_ONLY_EXPORTS.map(
+          let serverOnlyExports = SERVER_ONLY_ROUTE_EXPORTS.map(
             (xport) => `\`${xport}\``
           ).join(", ");
           throw Error(
@@ -1070,24 +1592,16 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
               "",
               `    '${id}' imported by route '${importerShort}'`,
               "",
-              `  The only route exports that can reference server-only modules are:`,
+              `  Remix automatically removes server-code from these exports:`,
               `    ${serverOnlyExports}`,
               "",
               `  But other route exports in '${importerShort}' depend on '${id}'.`,
               "",
-              "  For more see https://remix.run/docs/en/main/discussion/server-vs-client",
+              "  See https://remix.run/docs/en/main/guides/vite#splitting-up-client-and-server-code",
               "",
             ].join("\n")
           );
         }
-
-        let importedBy = path.parse(importerShort);
-        let dotServerFile = vite.normalizePath(
-          path.join(
-            importedBy.dir,
-            importedBy.name + ".server" + importedBy.ext
-          )
-        );
 
         throw Error(
           [
@@ -1095,21 +1609,7 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
             "",
             `    '${id}' imported by '${importerShort}'`,
             "",
-
-            `  * If all code in '${importerShort}' is server-only:`,
-            "",
-            `    Rename it to '${dotServerFile}'`,
-            "",
-            `  * Otherwise:`,
-            "",
-            `    - Keep client-safe code in '${importerShort}'`,
-            `    - And move server-only code to a \`.server\` file`,
-            `      e.g. '${dotServerFile}'`,
-            "",
-            "  If you have lots of `.server` files, try using",
-            "  a `.server` directory e.g. 'app/.server'",
-            "",
-            "  For more, see https://remix.run/docs/en/main/future/vite#server-code-not-tree-shaken-in-development",
+            "  See https://remix.run/docs/en/main/guides/vite#splitting-up-client-and-server-code",
             "",
           ].join("\n")
         );
@@ -1117,7 +1617,6 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
     },
     {
       name: "remix-dot-client",
-      enforce: "post",
       async transform(code, id, options) {
         if (!options?.ssr) return;
         let clientFileRE = /\.client(\.[cm]?[jt]sx?)?$/;
@@ -1139,19 +1638,16 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
     },
     {
       name: "remix-route-exports",
-      enforce: "post", // Ensure we're operating on the transformed code to support MDX etc.
       async transform(code, id, options) {
         if (options?.ssr) return;
 
-        let pluginConfig = cachedPluginConfig || (await resolvePluginConfig());
-
-        let route = getRoute(pluginConfig, id);
+        let route = getRoute(ctx.remixConfig, id);
         if (!route) return;
 
-        if (pluginConfig.isSpaMode) {
+        if (!ctx.remixConfig.ssr) {
           let serverOnlyExports = esModuleLexer(code)[1]
             .map((exp) => exp.n)
-            .filter((exp) => SERVER_ONLY_EXPORTS.includes(exp));
+            .filter((exp) => SERVER_ONLY_ROUTE_EXPORTS.includes(exp));
           if (serverOnlyExports.length > 0) {
             let str = serverOnlyExports.map((e) => `\`${e}\``).join(", ");
             let message =
@@ -1176,58 +1672,13 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
           }
         }
 
-        return {
-          code: removeExports(code, SERVER_ONLY_EXPORTS),
-          map: null,
-        };
-      },
-    },
-    {
-      name: "remix-remix-react-proxy",
-      enforce: "post", // Ensure we're operating on the transformed code to support MDX etc.
-      resolveId(id) {
-        if (id === remixReactProxyId) {
-          return VirtualModule.resolve(remixReactProxyId);
-        }
-      },
-      transform(code, id) {
-        // Don't transform the proxy itself, otherwise it will import itself
-        if (id === VirtualModule.resolve(remixReactProxyId)) {
-          return;
-        }
+        let [filepath] = id.split("?");
 
-        let hasLiveReloadHints =
-          code.includes("LiveReload") && code.includes("@remix-run/react");
-
-        // Don't transform files that don't need the proxy
-        if (!hasLiveReloadHints) {
-          return;
-        }
-
-        // Rewrite imports to use the proxy
-        return replaceImportSpecifier({
-          code,
-          specifier: "@remix-run/react",
-          replaceWith: remixReactProxyId,
+        return removeExports(code, SERVER_ONLY_ROUTE_EXPORTS, {
+          sourceMaps: true,
+          filename: id,
+          sourceFileName: filepath,
         });
-      },
-      load(id) {
-        if (id === VirtualModule.resolve(remixReactProxyId)) {
-          // TODO: ensure react refresh is initialized before `<Scripts />`
-          return [
-            'import { createElement } from "react";',
-            'export * from "@remix-run/react";',
-            `export const LiveReload = ${
-              viteCommand !== "serve"
-            } ? () => null : `,
-            '({ nonce = undefined }) => createElement("script", {',
-            "  nonce,",
-            "  dangerouslySetInnerHTML: { ",
-            "    __html: `window.__remixLiveReloadEnabled = true`",
-            "  }",
-            "});",
-          ].join("\n");
-        }
       },
     },
     {
@@ -1279,13 +1730,13 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
     },
     {
       name: "remix-react-refresh-babel",
-      enforce: "post", // jsx and typescript (in ts, jsx, tsx files) are already transpiled by vite
       async transform(code, id, options) {
         if (viteCommand !== "serve") return;
         if (id.includes("/node_modules/")) return;
 
         let [filepath] = id.split("?");
-        if (!/.[tj]sx?$/.test(filepath)) return;
+        let extensionsRE = /\.(jsx?|tsx?|mdx?)$/;
+        if (!extensionsRE.test(filepath)) return;
 
         let devRuntime = "react/jsx-dev-runtime";
         let ssr = options?.ssr === true;
@@ -1294,6 +1745,8 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
         if (!useFastRefresh) return;
 
         let result = await babel.transformAsync(code, {
+          configFile: false,
+          babelrc: false,
           filename: id,
           sourceFileName: filepath,
           parserOpts: {
@@ -1308,35 +1761,31 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
         code = result.code!;
         let refreshContentRE = /\$Refresh(?:Reg|Sig)\$\(/;
         if (refreshContentRE.test(code)) {
-          let pluginConfig =
-            cachedPluginConfig || (await resolvePluginConfig());
-          code = addRefreshWrapper(pluginConfig, code, id);
+          code = addRefreshWrapper(ctx.remixConfig, code, id);
         }
         return { code, map: result.map };
       },
     },
     {
       name: "remix-hmr-updates",
-      async handleHotUpdate({ server, file, modules }) {
-        let pluginConfig = await resolvePluginConfig();
-        // Update the config cache any time there is a file change
-        cachedPluginConfig = pluginConfig;
-        let route = getRoute(pluginConfig, file);
+      async handleHotUpdate({ server, file, modules, read }) {
+        let route = getRoute(ctx.remixConfig, file);
 
-        type ManifestRoute = Manifest["routes"][string];
+        type ManifestRoute = RemixManifest["routes"][string];
         type HmrEventData = { route: ManifestRoute | null };
         let hmrEventData: HmrEventData = { route: null };
 
         if (route) {
           // invalidate manifest on route exports change
           let serverManifest = (await server.ssrLoadModule(serverManifestId))
-            .default as Manifest;
+            .default as RemixManifest;
 
           let oldRouteMetadata = serverManifest.routes[route.id];
           let newRouteMetadata = await getRouteMetadata(
-            pluginConfig,
+            ctx,
             viteChildCompiler,
-            route
+            route,
+            read
           );
 
           hmrEventData.route = newRouteMetadata;
@@ -1366,16 +1815,77 @@ export const remixVitePlugin: RemixVitePlugin = (options = {}) => {
         return modules;
       },
     },
+    {
+      name: "remix-server-change-trigger-client-hmr",
+      // This hook is only available in Vite v6+ so this is a no-op in v5.
+      // Previously the server and client modules were shared in a single module
+      // graph. This meant that changes to server code automatically resulted in
+      // client HMR updates. In Vite v6+ these module graphs are separate from
+      // each other so we need to manually trigger client HMR updates if server
+      // code has changed.
+      hotUpdate(this, { server, modules }) {
+        if (this.environment.name !== "ssr" && modules.length <= 0) {
+          return;
+        }
+
+        let clientModules = uniqueNodes(
+          modules.flatMap((mod) =>
+            getParentClientNodes(server.environments.client.moduleGraph, mod)
+          )
+        );
+
+        for (let clientModule of clientModules) {
+          server.environments.client.reloadModule(clientModule);
+        }
+      },
+    },
   ];
 };
 
+function getParentClientNodes(
+  clientModuleGraph: Vite.EnvironmentModuleGraph,
+  module: Vite.EnvironmentModuleNode
+): Vite.EnvironmentModuleNode[] {
+  if (!module.id) {
+    return [];
+  }
+
+  let clientModule = clientModuleGraph.getModuleById(module.id);
+  if (clientModule) {
+    return [clientModule];
+  }
+
+  return [...module.importers].flatMap((importer) =>
+    getParentClientNodes(clientModuleGraph, importer)
+  );
+}
+
+function uniqueNodes(
+  nodes: Vite.EnvironmentModuleNode[]
+): Vite.EnvironmentModuleNode[] {
+  let nodeUrls = new Set<string>();
+  let unique: Vite.EnvironmentModuleNode[] = [];
+  for (let node of nodes) {
+    if (nodeUrls.has(node.url)) {
+      continue;
+    }
+    nodeUrls.add(node.url);
+    unique.push(node);
+  }
+  return unique;
+}
+
+function isEqualJson(v1: unknown, v2: unknown) {
+  return JSON.stringify(v1) === JSON.stringify(v2);
+}
+
 function addRefreshWrapper(
-  pluginConfig: ResolvedRemixVitePluginConfig,
+  remixConfig: ResolvedVitePluginConfig,
   code: string,
   id: string
 ): string {
-  let isRoute = getRoute(pluginConfig, id);
-  let acceptExports = isRoute
+  let route = getRoute(remixConfig, id);
+  let acceptExports = route
     ? [
         "clientAction",
         "clientLoader",
@@ -1386,12 +1896,11 @@ function addRefreshWrapper(
       ]
     : [];
   return (
-    REACT_REFRESH_HEADER.replace("__SOURCE__", JSON.stringify(id)) +
+    REACT_REFRESH_HEADER.replaceAll("__SOURCE__", JSON.stringify(id)) +
     code +
-    REACT_REFRESH_FOOTER.replace("__SOURCE__", JSON.stringify(id)).replace(
-      "__ACCEPT_EXPORTS__",
-      JSON.stringify(acceptExports)
-    )
+    REACT_REFRESH_FOOTER.replaceAll("__SOURCE__", JSON.stringify(id))
+      .replaceAll("__ACCEPT_EXPORTS__", JSON.stringify(acceptExports))
+      .replaceAll("__ROUTE_ID__", JSON.stringify(route?.id))
   );
 }
 
@@ -1402,7 +1911,7 @@ const inWebWorker = typeof WorkerGlobalScope !== 'undefined' && self instanceof 
 let prevRefreshReg;
 let prevRefreshSig;
 
-if (import.meta.hot && !inWebWorker && window.__remixLiveReloadEnabled) {
+if (import.meta.hot && !inWebWorker) {
   if (!window.__vite_plugin_react_preamble_installed__) {
     throw new Error(
       "Remix Vite plugin can't detect preamble. Something is wrong."
@@ -1418,13 +1927,14 @@ if (import.meta.hot && !inWebWorker && window.__remixLiveReloadEnabled) {
 }`.replace(/\n+/g, "");
 
 const REACT_REFRESH_FOOTER = `
-if (import.meta.hot && !inWebWorker && window.__remixLiveReloadEnabled) {
+if (import.meta.hot && !inWebWorker) {
   window.$RefreshReg$ = prevRefreshReg;
   window.$RefreshSig$ = prevRefreshSig;
   RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
     RefreshRuntime.registerExportsForReactRefresh(__SOURCE__, currentExports);
     import.meta.hot.accept((nextExports) => {
       if (!nextExports) return;
+      __ROUTE_ID__ && window.__remixRouteModuleUpdates.set(__ROUTE_ID__, nextExports);
       const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate(currentExports, nextExports, __ACCEPT_EXPORTS__);
       if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
     });
@@ -1432,29 +1942,30 @@ if (import.meta.hot && !inWebWorker && window.__remixLiveReloadEnabled) {
 }`;
 
 function getRoute(
-  pluginConfig: ResolvedRemixVitePluginConfig,
+  pluginConfig: ResolvedVitePluginConfig,
   file: string
-): ConfigRoute | undefined {
-  let vite = importViteEsmSync();
-  if (!file.startsWith(vite.normalizePath(pluginConfig.appDirectory))) return;
+): RouteManifestEntry | undefined {
+  let vite = getVite();
   let routePath = vite.normalizePath(
     path.relative(pluginConfig.appDirectory, file)
   );
   let route = Object.values(pluginConfig.routes).find(
-    (r) => r.file === routePath
+    (r) => vite.normalizePath(r.file) === routePath
   );
   return route;
 }
 
 async function getRouteMetadata(
-  pluginConfig: ResolvedRemixVitePluginConfig,
+  ctx: RemixPluginContext,
   viteChildCompiler: Vite.ViteDevServer | null,
-  route: ConfigRoute
+  route: RouteManifestEntry,
+  readRouteFile?: () => string | Promise<string>
 ) {
   let sourceExports = await getRouteModuleExports(
     viteChildCompiler,
-    pluginConfig,
-    route.file
+    ctx,
+    route.file,
+    readRouteFile
   );
 
   let info = {
@@ -1463,16 +1974,21 @@ async function getRouteMetadata(
     path: route.path,
     index: route.index,
     caseSensitive: route.caseSensitive,
-    url:
+    url: combineURLs(
+      ctx.remixConfig.publicPath,
       "/" +
-      path.relative(
-        pluginConfig.rootDirectory,
-        resolveRelativeRouteFilePath(route, pluginConfig)
-      ),
-    module: `${resolveFileUrl(
-      pluginConfig,
-      resolveRelativeRouteFilePath(route, pluginConfig)
-    )}?import`, // Ensure the Vite dev server responds with a JS module
+        path.relative(
+          ctx.rootDirectory,
+          resolveRelativeRouteFilePath(route, ctx.remixConfig)
+        )
+    ),
+    module: combineURLs(
+      ctx.remixConfig.publicPath,
+      `${resolveFileUrl(
+        ctx,
+        resolveRelativeRouteFilePath(route, ctx.remixConfig)
+      )}?import`
+    ), // Ensure the Vite dev server responds with a JS module
     hasAction: sourceExports.includes("action"),
     hasClientAction: sourceExports.includes("clientAction"),
     hasLoader: sourceExports.includes("loader"),
@@ -1486,8 +2002,9 @@ async function getRouteMetadata(
 async function handleSpaMode(
   serverBuildDirectoryPath: string,
   serverBuildFile: string,
-  assetsBuildDirectory: string,
-  viteConfig: Vite.ResolvedConfig
+  clientBuildDirectory: string,
+  viteConfig: Vite.ResolvedConfig,
+  basename: string
 ) {
   // Create a handler and call it for the `/` path - rendering down to the
   // proper HydrateFallback ... or not!  Maybe they have a static landing page
@@ -1496,16 +2013,32 @@ async function handleSpaMode(
   let build = await import(url.pathToFileURL(serverBuildPath).toString());
   let { createRequestHandler: createHandler } = await import("@remix-run/node");
   let handler = createHandler(build, viteConfig.mode);
-  let response = await handler(new Request("http://localhost/"));
-  invariant(response.status === 200, "Error generating the index.html file");
+  let response = await handler(new Request(`http://localhost${basename}`));
+  let html = await response.text();
+  if (response.status !== 200) {
+    throw new Error(
+      `SPA Mode: Received a ${response.status} status code from ` +
+        `\`entry.server.tsx\` while generating the \`index.html\` file.\n${html}`
+    );
+  }
+
+  if (
+    !html.includes("window.__remixContext =") ||
+    !html.includes("window.__remixRouteModules =")
+  ) {
+    throw new Error(
+      "SPA Mode: Did you forget to include <Scripts/> in your `root.tsx` " +
+        "`HydrateFallback` component?  Your `index.html` file cannot hydrate " +
+        "into a SPA without `<Scripts />`."
+    );
+  }
 
   // Write out the index.html file for the SPA
-  let htmlPath = path.join(assetsBuildDirectory, "index.html");
-  await fse.writeFile(htmlPath, await response.text());
+  await fse.writeFile(path.join(clientBuildDirectory, "index.html"), html);
 
   viteConfig.logger.info(
     "SPA Mode: index.html has been written to your " +
-      colors.bold(path.relative(process.cwd(), assetsBuildDirectory)) +
+      colors.bold(path.relative(process.cwd(), clientBuildDirectory)) +
       " directory"
   );
 

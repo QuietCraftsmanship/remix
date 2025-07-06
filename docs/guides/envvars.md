@@ -6,9 +6,9 @@ title: Environment Variables
 
 Remix does not do anything directly with environment variables (except during local development), but there are some patterns we find useful that we'll share in this guide.
 
-Environment Variables are values that live on the server that your application can use. You may be familiar with the ubiquitous `NODE_ENV`. Your deployment server probably automatically sets that to "production".
+Environment Variables are values that live on the server that your application can use. You may be familiar with the ubiquitous `NODE_ENV`. Your deployment server probably automatically sets that to `"production"`.
 
-<docs-warning>Running `remix build` compiles using the value of `process.env.NODE_ENV` if it corresponds with a valid mode: "production", "development" or "test". If the value of `process.env.NODE_ENV` is invalid, "production" is used as a default.</docs-warning>
+<docs-warning>Running `remix build` compiles using the value of `process.env.NODE_ENV` if it corresponds with a valid mode: `"production"`, `"development"` or `"test"`. If the value of `process.env.NODE_ENV` is invalid, `"production"` is used as a default.</docs-warning>
 
 Here are some example environment variables you might find in the wild:
 
@@ -30,7 +30,7 @@ First, create an `.env` file in the root of your project:
 touch .env
 ```
 
-<docs-error>Do not commit your <code>.env</code> file to git, the point is that it contains secrets!</docs-error>
+<docs-error>Do not commit your <code>.env</code> file to git; the point is that it contains secrets!</docs-error>
 
 Edit your `.env` file.
 
@@ -46,33 +46,23 @@ export async function loader() {
 }
 ```
 
-If you're using the `@remix-run/cloudflare-pages` adapter, env variables work a little differently. Since Cloudflare Pages are powered by Functions, you'll need to define your local environment variables in the [`.dev.vars`][dev-vars] file. It has the same syntax as `.env` example file mentioned above.
+If you're using the `@remix-run/cloudflare-pages` or `@remix-run/cloudflare` adapters, env variables work a little differently. You'll need to define your local environment variables in the [`.dev.vars`][dev-vars] file. It has the same syntax as `.env` example file mentioned above.
 
-Then, you can pass those through via `getLoadContext` in your server file:
-
-```ts
-export const onRequest = createPagesFunctionHandler({
-  build,
-  getLoadContext: (context) => ({ env: context.env }), // Hand-off Cloudflare ENV vars to the Remix `context` object
-  mode: build.mode,
-});
-```
-
-And they'll be available via Remix's `context` in your `loader`/`action` functions:
+Then, they'll be available via Remix's `context.cloudflare.env` in your `loader`/`action` functions:
 
 ```tsx
 export const loader = async ({
   context,
 }: LoaderFunctionArgs) => {
-  console.log(context.env.SOME_SECRET);
+  console.log(context.cloudflare.env.SOME_SECRET);
 };
 ```
 
-Note that `.env` files are only for development. You should not use them in production, so Remix doesn't load them when running `remix serve`. You'll need to follow your host's guides on adding secrets to your production server, via the links below.
+Note that `.env` and `.dev.vars` files are only for development. You should not use them in production, so Remix doesn't load them when running `remix serve`. You'll need to follow your host's guides on adding secrets to your production server, via the links below.
 
 ### Production
 
-Environment variables when deployed to production will be handled by your host, for example:
+Your host will handle environment variables when deployed to production, for example:
 
 - [Netlify][netlify]
 - [Fly.io][fly-io]
@@ -89,7 +79,7 @@ Some folks ask if Remix can let them put environment variables into browser bund
 2. You can't change the values without a rebuild and redeploy.
 3. It's easy to accidentally leak secrets into publicly accessible files!
 
-Instead we recommend keeping all of your environment variables on the server (all the server secrets as well as the stuff your JavaScript in the browser needs) and exposing them to your browser code through `window.ENV`. Since you always have a server, you don't need this information in your bundle, your server can provide the client-side environment variables in the loaders.
+Instead, we recommend keeping all of your environment variables on the server (all the server secrets as well as the stuff your JavaScript in the browser needs) and exposing them to your browser code through `window.ENV`. Since you always have a server, you don't need this information in your bundle; your server can provide the client-side environment variables in the loaders.
 
 1. **Return `ENV` for the client from the root loader** - Inside your loader you can access your server's environment variables. Loaders only run on the server and are never bundled into your client-side JavaScript.
 
@@ -176,4 +166,4 @@ Instead we recommend keeping all of your environment variables on the server (al
 [cloudflare-workers]: https://developers.cloudflare.com/workers/platform/environment-variables
 [vercel]: https://vercel.com/docs/environment-variables
 [architect]: https://arc.codes/docs/en/reference/cli/env
-[dev-vars]: https://developers.cloudflare.com/pages/platform/functions/#adding-environment-variables-locally
+[dev-vars]: https://developers.cloudflare.com/pages/functions/bindings/#interact-with-your-environment-variables-locally

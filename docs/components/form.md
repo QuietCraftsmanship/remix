@@ -4,7 +4,11 @@ title: Form
 
 # `<Form>`
 
-A progressively enhanced HTML [`<form>`][form_element] wrapper, useful for submissions that should also change the URL or otherwise add an entry to the browser history stack. For forms that shouldn't manipulate the browser history stack, use [`<fetcher.Form>`][fetcher_form].
+A progressively enhanced HTML [`<form>`][form_element] that submits data to actions via `fetch`, activating pending states in `useNavigation` which enables advanced user interfaces beyond a basic HTML form. After a form's action completes, all data on the page is automatically revalidated from the server to keep the UI in sync with the data.
+
+Because it uses the HTML form API, server-rendered pages are interactive at a basic level before JavaScript loads. Instead of Remix managing the submission, the browser manages the submission as well as the pending states (like the spinning favicon). After JavaScript loads, Remix takes over enabling web application user experiences.
+
+Form is most useful for submissions that should also change the URL or otherwise add an entry to the browser history stack. For forms that shouldn't manipulate the browser history stack, use [`<fetcher.Form>`][fetcher_form].
 
 ```tsx
 import { Form } from "@remix-run/react";
@@ -75,7 +79,7 @@ If you are using [`<ScrollRestoration>`][scroll_restoration_component], this let
 
 ### `replace`
 
-Replaces the current entry in the history stack, instead of pushing the new entry.
+Replaces the current entry in the history stack instead of pushing the new entry.
 
 ```tsx
 <Form replace />
@@ -91,13 +95,9 @@ If true, it will submit the form with the browser instead of client side routing
 
 This is recommended over [`<form>`][form_element]. When the `action` prop is omitted, `<Form>` and `<form>` will sometimes call different actions depending on what the current URL is since `<form>` uses the current URL as the default, but `<Form>` uses the URL for the route the form is rendered in.
 
-### `unstable_viewTransition`
+### `viewTransition`
 
-The `unstable_viewTransition` prop enables a [View Transition][view-transitions] for this navigation by wrapping the final state update in [`document.startViewTransition()`][document-start-view-transition]. If you need to apply specific styles for this view transition, you will also need to leverage the [`unstable_useViewTransitionState()`][use-view-transition-state].
-
-<docs-warning>
-Please note that this API is marked unstable and may be subject to breaking changes without a major release.
-</docs-warning>
+The `viewTransition` prop enables a [View Transition][view-transitions] for this navigation by wrapping the final state update in [`document.startViewTransition()`][document-start-view-transition]. If you need to apply specific styles for this view transition, you will also need to leverage the [`useViewTransitionState()`][use-view-transition-state].
 
 ## Notes
 

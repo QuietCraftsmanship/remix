@@ -1,4 +1,3 @@
-import "@remix-run/node/install";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -34,7 +33,6 @@ sourceMapSupport.install({
     return null;
   },
 });
-installGlobals();
 
 run();
 
@@ -100,6 +98,8 @@ async function run() {
   }
 
   let build: ServerBuild = await reimportServer();
+
+  installGlobals({ nativeFetch: build.future.v3_singleFetch });
 
   let onListen = () => {
     let address =

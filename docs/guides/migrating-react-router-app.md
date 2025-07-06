@@ -7,9 +7,11 @@ description: Migrating your React Router app to Remix can be done all at once or
 
 # Migrating your React Router App to Remix
 
-Millions of React applications deployed worldwide are powered by [React Router][react-router]. Chances are you've shipped a few of them! Because Remix is built on top of React Router, we have worked to make migration an easy process you can work through iteratively to avoid huge refactors.
+<docs-warning>This guide currently assumes you are using the [Classic Remix Compiler][classic-remix-compiler] rather than [Remix Vite][remix-vite].</docs-warning>
 
-If you aren't already using React Router, we think there are several compelling reasons to reconsider! History management, dynamic path matching, nested routing, and much more. Take a look at the [React Router docs][react-router-docs] and see all what we have to offer.
+React Router powers millions of React applications deployed worldwide[][react-router]. Chances are you've shipped a few of them! Because Remix is built on top of React Router, we have worked to make migration an easy process you can work through iteratively to avoid huge refactors.
+
+If you aren't already using React Router, we think there are several compelling reasons to reconsider! History management, dynamic path matching, nested routing, and much more. Take a look at the [React Router docs][react-router-docs] and see all that we have to offer.
 
 ## Ensure your app uses React Router v6
 
@@ -36,7 +38,7 @@ import App from "./App";
 render(<App />, document.getElementById("app"));
 ```
 
-Server-rendered React apps are a little different. The browser script is not rendering your app, but is "hydrating" the DOM provided by the server. Hydration is the process of mapping the elements in the DOM to their React component counterparts and setting up event listeners so that your app is interactive.
+Server-rendered React apps are a little different. The browser script is not rendering your app but is "hydrating" the DOM provided by the server. Hydration is the process of mapping the elements in the DOM to their React component counterparts and setting up event listeners so that your app is interactive.
 
 Let's start by creating two new files:
 
@@ -281,7 +283,7 @@ Lastly, in your root `App` component (the one that would have been mounted to th
 
 Remix needs routes beyond the root route to know what to render in `<Outlet />`. Fortunately you already render `<Route>` components in your app, and Remix can use those as you migrate to use our [routing conventions][routing-conventions].
 
-To start, create a new directory in `app` called `routes`. In that directory, create two files called `_index.tsx` and `$.tsx`. `$.tsx` is called [a **catch-all route**][a-catch-all-route], and it will be useful to let your old app handle routes that you haven't moved into the `routes` directory yet.
+To start, create a new directory in `app` called `routes`. In that directory, create two files called `_index.tsx` and `$.tsx`. `$.tsx` is called [a **catch-all or "splat" route**][a-catch-all-route], and it will be useful to let your old app handle routes that you haven't moved into the `routes` directory yet.
 
 Inside your `_index.tsx` and `$.tsx` files, all we need to do is export the code from our old root `App`:
 
@@ -310,7 +312,7 @@ In your `package.json` file, update your scripts to use `remix` commands instead
 }
 ```
 
-And poof! Your app is now server-rendered and your build went from 90 seconds to 0.5 seconds ⚡
+And poof! Your app is now server-rendered, and your build went from 90 seconds to 0.5 seconds ⚡
 
 ## Creating your routes
 
@@ -391,7 +393,7 @@ One potential solution here is using a different caching mechanism that can be u
 
 ```tsx
 // We can safely track hydration in memory state
-// outside of the component because it is only
+// outside the component because it is only
 // updated once after the version instance of
 // `SomeComponent` has been hydrated. From there,
 // the browser takes over rendering duties across
@@ -445,7 +447,7 @@ Every Remix app accepts a `remix.config.js` file in the project root. While its 
 /** @type {import('@remix-run/dev').AppConfig} */
 module.exports = {
   appDirectory: "app",
-  ignoredRouteFiles: ["**/.*"],
+  ignoredRouteFiles: ["**/*.css"],
   assetsBuildDirectory: "public/build",
 };
 ```
@@ -497,9 +499,9 @@ If you are using TypeScript, you also need to create the `remix.env.d.ts` file i
 
 ### A note about non-standard imports
 
-At this point, you _might_ be able to run your app with no changes. If you are using Create React App or a highly-configured bundler setup, you likely use `import` to include non-JavaScript modules like stylesheets and images.
+At this point, you _might_ be able to run your app with no changes. If you are using Create React App or a highly configured bundler setup, you likely use `import` to include non-JavaScript modules like stylesheets and images.
 
-Remix does not support most non-standard imports, and we think for good reason. Below is a non-exhaustive list of some of the differences you'll encounter in Remix, and how to refactor as you migrate.
+Remix does not support most non-standard imports, and we think for good reason. Below is a non-exhaustive list of some of the differences you'll encounter in Remix and how to refactor as you migrate.
 
 #### Asset imports
 
@@ -614,7 +616,7 @@ If you currently inject `<link />` tags into your page client-side in your exist
 
 ### CSS bundling
 
-Remix has built-in support for [CSS Modules][css-modules], [Vanilla Extract][vanilla-extract] and [CSS side effect imports][css-side-effect-imports]. In order to make use of these features, you'll need to set up CSS bundling in your application.
+Remix has built-in support for [CSS Modules][css-modules], [Vanilla Extract][vanilla-extract] and [CSS side effect imports][css-side-effect-imports]. To make use of these features, you'll need to set up CSS bundling in your application.
 
 First, to get access to the generated CSS bundle, install the `@remix-run/css-bundle` package.
 
@@ -655,7 +657,7 @@ Similar to `links`, each route can also export a `meta` function that returns va
 The behavior for `meta` is slightly different from `links`. Instead of merging values from other `meta` functions in the route hierarchy, **each leaf route is responsible for rendering its own tags**. This is because:
 
 - You often want more fine-grained control over metadata for optimal SEO
-- In the case of some tags that follow the [Open Graph protocol][open-graph-protocol], the ordering of some tags impacts how they are interpreted by crawlers and social media sites, and it's less predictable for Remix to assume how complex metadata should be merged
+- In the case of some tags that follow the [Open Graph protocol][open-graph-protocol], the ordering of some tags impacts how they are interpreted by crawlers and social media sites. It's less predictable for Remix to assume how complex metadata should be merged
 - Some tags allow for multiple values while others do not, and Remix shouldn't assume how you want to handle all of those cases
 
 ### Updating imports
@@ -691,17 +693,17 @@ Now then, go off and _remix your app_. We think you'll like what you build along
 - [Common "gotchas"][common-gotchas]
 
 [react-router]: https://reactrouter.com
-[react-router-docs]: https://reactrouter.com/start/concepts
-[migration-guide-from-v5-to-v6]: https://reactrouter.com/upgrading/v5
+[react-router-docs]: https://reactrouter.com/v6/start/concepts
+[migration-guide-from-v5-to-v6]: https://reactrouter.com/en/6.22.3/upgrading/v5
 [backwards-compatibility-package]: https://www.npmjs.com/package/react-router-dom-v5-compat
 [a-few-tweaks-to-improve-progressive-enhancement]: ../pages/philosophy#progressive-enhancement
 [routing-conventions]: ./routing
-[a-catch-all-route]: ./routing#splats
-[hydration-mismatch]: https://reactjs.org/docs/react-dom.html#hydrate
+[a-catch-all-route]: ../file-conventions/routes#splat-routes
+[hydration-mismatch]: https://react.dev/reference/react-dom/client/hydrateRoot
 [loader-data]: ../route/loader
 [client-only-component]: https://github.com/sergiodxa/remix-utils/blob/main/src/react/client-only.tsx
 [remix-utils]: https://www.npmjs.com/package/remix-utils
-[examples-repository]: https://github.com/remix-run/examples/blob/main/client-only-components/app/routes/index.tsx
+[examples-repository]: https://github.com/remix-run/examples/blob/main/client-only-components/app/routes/_index.tsx
 [react-lazy]: https://reactjs.org/docs/code-splitting.html#reactlazy
 [react-suspense]: https://reactjs.org/docs/react-api.html#reactsuspense
 [client-only-approach]: #client-only-components
@@ -725,3 +727,5 @@ Now then, go off and _remix your app_. We think you'll like what you build along
 [css-side-effect-imports]: ./styling#css-side-effect-imports
 [css-bundling]: ./styling#css-bundling
 [open-graph-protocol]: https://ogp.me
+[classic-remix-compiler]: ./vite#classic-remix-compiler-vs-remix-vite
+[remix-vite]: ./vite

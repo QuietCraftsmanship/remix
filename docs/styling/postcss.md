@@ -4,6 +4,8 @@ title: PostCSS
 
 # PostCSS
 
+<docs-warning>This documentation is only relevant when using the [Classic Remix Compiler][classic-remix-compiler]. If you're using [Remix Vite][remix-vite], support for [PostCSS is built into Vite][vite-postcss].</docs-warning>
+
 [PostCSS][postcss] is a popular tool with a rich plugin ecosystem, commonly used to prefix CSS for older browsers, transpile future CSS syntax, inline images, lint your styles and more. When a PostCSS config is detected, Remix will automatically run PostCSS across all CSS in your project.
 
 For example, to use [Autoprefixer][autoprefixer], first install the PostCSS plugin.
@@ -44,17 +46,17 @@ You can use CSS preprocessors like LESS and SASS. Doing so requires running an a
 
 Once converted to CSS by the preprocessor, the generated CSS files can be imported into your components via the [Route Module `links` export][route-module-links] function, or included via [side effect imports][css-side-effect-imports] when using [CSS bundling][css-bundling], just like any other CSS file in Remix.
 
-To ease development with CSS preprocessors you can add npm scripts to your `package.json` that generate CSS files from your SASS or LESS files. These scripts can be run in parallel alongside any other npm scripts that you run for developing a Remix application.
+To ease development with CSS preprocessors, you can add npm scripts to your `package.json` that generate CSS files from your SASS or LESS files. These scripts can be run in parallel alongside any other npm scripts that you run for developing a Remix application.
 
 An example using SASS.
 
-1. First you'll need to install the tool your preprocess uses to generate CSS files.
+1. First, you'll need to install the tool your preprocessing uses to generate CSS files.
 
    ```shellscript nonumber
    npm add -D sass
    ```
 
-2. Add an npm script to your `package.json`'s `scripts` section that uses the installed tool to generate CSS files.
+2. Add an `npm` script to your `package.json`'s `scripts` section that uses the installed tool to generate CSS files.
 
    ```jsonc filename=package.json
    {
@@ -77,7 +79,7 @@ An example using SASS.
    npm run sass
    ```
 
-   This will start the `sass` process. Any new SASS files, or changes to existing SASS files, will be detected by the running process.
+   This will start the `sass` process. The running process will detect any new SASS files or changes to existing SASS files.
 
    You might want to use something like `concurrently` to avoid needing two terminal tabs to generate your CSS files and also run `remix dev`.
 
@@ -103,3 +105,6 @@ An example using SASS.
 [css-bundling]: ./bundling
 [postcss-preset-env]: https://preset-env.cssdb.org
 [esbuild-css-tree-shaking-issue]: https://github.com/evanw/esbuild/issues/1370
+[classic-remix-compiler]: ../guides/vite#classic-remix-compiler-vs-remix-vite
+[remix-vite]: ../guides/vite
+[vite-postcss]: https://vitejs.dev/guide/features#postcss

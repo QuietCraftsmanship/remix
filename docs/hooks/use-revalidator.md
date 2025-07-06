@@ -31,7 +31,7 @@ Remix already revalidates the data on the page automatically when actions are ca
 
 ### `revalidator.state`
 
-The state the revalidation. Either `"idle"` or `"loading"`.
+The state of the revalidation. Either `"idle"` or `"loading"`.
 
 ### `revalidator.revalidate()`
 
@@ -40,15 +40,16 @@ Initiates a revalidation.
 ```tsx
 function useLivePageData() {
   const revalidator = useRevalidator();
-  const interval = useInterval(5000);
 
-  useEffect(() => {
+  useInterval(() => {
     if (revalidator.state === "idle") {
       revalidator.revalidate();
     }
-  }, [interval, revalidator]);
+  }, 5000);
 }
 ```
+
+See [here][here] for a sample `useInterval` implementation.
 
 ## Notes
 
@@ -56,8 +57,9 @@ While you can render multiple occurrences of `useRevalidator` at the same time, 
 
 Race conditions are automatically handled when calling `revalidate()` when a revalidation is already in progress for any other reason.
 
-If a navigation happens while a revalidation is in flight, the revalidation will be cancelled and fresh data will be requested from all loaders for the next page.
+If a navigation happens while a revalidation is in flight, the revalidation will be canceled and fresh data will be requested from all loaders for the next page.
 
 [form-component]: ../components/form
 [use-fetcher]: ./use-fetcher
 [use-submit]: ./use-submit
+[here]: https://overreacted.io/making-setinterval-declarative-with-react-hooks

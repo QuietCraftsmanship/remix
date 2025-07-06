@@ -1,85 +1,169 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Page, PlaywrightWorkerOptions } from "@playwright/test";
-import { test, expect } from "@playwright/test";
-import getPort from "get-port";
+import { expect } from "@playwright/test";
 
+import type { Files } from "./helpers/vite.js";
 import {
-  createProject,
+  test,
   createEditor,
-  viteDev,
-  customDev,
-  VITE_CONFIG,
   EXPRESS_SERVER,
+  viteConfig,
+  viteMajorTemplates,
 } from "./helpers/vite.js";
+import { js } from "./helpers/create-fixture.js";
 
-const files = {
-  "app/routes/_index.tsx": String.raw`
-    // imports
-    import { useState, useEffect } from "react";
+const indexRoute = `
+  // imports
+  import { useState, useEffect } from "react";
 
-    export const meta = () => [{ title: "HMR updated title: 0" }]
+  export const meta = () => [{ title: "HMR updated title: 0" }]
 
-    // loader
+  // loader
 
-    export default function IndexRoute() {
-      // hooks
-      const [mounted, setMounted] = useState(false);
-      useEffect(() => {
-        setMounted(true);
-      }, []);
+  export default function IndexRoute() {
+    // hooks
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => {
+      setMounted(true);
+    }, []);
 
-      return (
-        <div id="index">
-          <h2 data-title>Index</h2>
-          <input />
-          <p data-mounted>Mounted: {mounted ? "yes" : "no"}</p>
-          <p data-hmr>HMR updated: 0</p>
-          {/* elements */}
-        </div>
-      );
-    }
-  `,
-};
+    return (
+      <div id="index">
+        <h2 data-title>Index</h2>
+        <input />
+        <p data-mounted>Mounted: {mounted ? "yes" : "no"}</p>
+        <p data-hmr>HMR updated: 0</p>
+        {/* elements */}
+      </div>
+    );
+  }
+`;
 
-test.describe(async () => {
-  let port: number;
-  let cwd: string;
-  let stop: () => Promise<void>;
+test.describe("Vite HMR & HDR", () => {
+  viteMajorTemplates.forEach(({ templateName, templateDisplayName }) => {
+    test.describe(templateDisplayName, () => {
+      test("vite dev", async ({ page, browserName, viteDev }) => {
+        let files: Files = async ({ port }) => ({
+          "vite.config.js": await viteConfig.basic({ port }),
+          "app/routes/_index.tsx": indexRoute,
+        });
+        let { cwd, port } = await viteDev(files, templateName);
+        await workflow({ page, browserName, cwd, port });
+      });
 
-  test.beforeAll(async () => {
-    port = await getPort();
-    cwd = await createProject({
-      "vite.config.js": await VITE_CONFIG({ port }),
-      ...files,
+      test("express", async ({ page, browserName, customDev }) => {
+        let files: Files = async ({ port }) => ({
+          "vite.config.js": await viteConfig.basic({ port }),
+          "server.mjs": EXPRESS_SERVER({ port }),
+          "app/routes/_index.tsx": indexRoute,
+        });
+        let { cwd, port } = await customDev(files, templateName);
+        await workflow({ page, browserName, cwd, port });
+      });
+
+      test("mdx", async ({ page, viteDev }) => {
+        let files: Files = async ({ port }) => ({
+          "vite.config.ts": `
+            import { defineConfig } from "vite";
+            import { vitePlugin as remix } from "@remix-run/dev";
+            import mdx from "@mdx-js/rollup";
+
+            export default defineConfig({
+              ${await viteConfig.server({ port })}
+              plugins: [
+                mdx(),
+                remix(),
+              ],
+            });
+          `,
+          "app/component.tsx": `
+            import {useState} from "react";
+
+            export const Counter = () => {
+              const [count, setCount] = useState(0);
+              return <button onClick={() => setCount(count => count + 1)}>Count: {count}</button>
+            }
+          `,
+          "app/routes/mdx.mdx": `
+            import { Counter } from "../component";
+
+            # MDX Title (HMR: 0)
+
+            <Counter />
+          `,
+        });
+
+        let { port, cwd } = await viteDev(files, templateName);
+        let edit = createEditor(cwd);
+        await page.goto(`http://localhost:${port}/mdx`, {
+          waitUntil: "networkidle",
+        });
+
+        await expect(page.locator("h1")).toHaveText("MDX Title (HMR: 0)");
+        let button = page.locator("button");
+        await expect(button).toHaveText("Count: 0");
+        await button.click();
+        await expect(button).toHaveText("Count: 1");
+
+        await edit("app/routes/mdx.mdx", (contents) =>
+          contents.replace("(HMR: 0)", "(HMR: 1)")
+        );
+        await page.waitForLoadState("networkidle");
+
+        await expect(page.locator("h1")).toHaveText("MDX Title (HMR: 1)");
+        await expect(page.locator("button")).toHaveText("Count: 1");
+
+        expect(page.errors).toEqual([]);
+      });
+
+      test.describe("single fetch", () => {
+        test("vite dev", async ({ page, browserName, viteDev }) => {
+          let files: Files = async ({ port }) => ({
+            "vite.config.js": js`
+              import { vitePlugin as remix } from "@remix-run/dev";
+
+              export default {
+                ${await viteConfig.server({ port })}
+                plugins: [
+                  remix({
+                    future: {
+                      v3_singleFetch: true
+                    },
+                  })
+                ]
+              }
+            `,
+            "app/routes/_index.tsx": indexRoute,
+          });
+          let { cwd, port } = await viteDev(files, templateName);
+          await workflow({ page, browserName, cwd, port });
+        });
+
+        test("express", async ({ page, browserName, customDev }) => {
+          let files: Files = async ({ port }) => ({
+            "vite.config.js": js`
+              import { vitePlugin as remix } from "@remix-run/dev";
+
+              export default {
+                ${await viteConfig.server({ port })}
+                plugins: [
+                  remix({
+                    future: {
+                      v3_singleFetch: true
+                    },
+                  })
+                ]
+              }
+            `,
+            "server.mjs": EXPRESS_SERVER({ port }),
+            "app/routes/_index.tsx": indexRoute,
+          });
+          let { cwd, port } = await customDev(files, templateName);
+          await workflow({ page, browserName, cwd, port });
+        });
+      });
     });
-    stop = await viteDev({ cwd, port });
-  });
-  test.afterAll(async () => await stop());
-
-  test("Vite / HMR & HDR / vite dev", async ({ page, browserName }) => {
-    await workflow({ page, browserName, cwd, port });
-  });
-});
-
-test.describe(async () => {
-  let port: number;
-  let cwd: string;
-  let stop: () => Promise<void>;
-
-  test.beforeAll(async () => {
-    port = await getPort();
-    cwd = await createProject({
-      "vite.config.js": await VITE_CONFIG({ port }),
-      "server.mjs": EXPRESS_SERVER({ port }),
-      ...files,
-    });
-    stop = await customDev({ cwd, port });
-  });
-  test.afterAll(async () => await stop());
-
-  test("Vite / HMR & HDR / express", async ({ page, browserName }) => {
-    await workflow({ page, browserName, cwd, port });
   });
 });
 
@@ -94,8 +178,6 @@ async function workflow({
   cwd: string;
   port: number;
 }) {
-  let pageErrors: Error[] = [];
-  page.on("pageerror", (error) => pageErrors.push(error));
   let edit = createEditor(cwd);
 
   // setup: initial render
@@ -116,7 +198,7 @@ async function workflow({
   let input = page.locator("#index input");
   await expect(input).toBeVisible();
   await input.type("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 
   // route: HMR
   await edit("app/routes/_index.tsx", (contents) =>
@@ -128,7 +210,7 @@ async function workflow({
   await expect(page).toHaveTitle("HMR updated title: 1");
   await expect(hmrStatus).toHaveText("HMR updated: 1");
   await expect(input).toHaveValue("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 
   // route: add loader
   await edit("app/routes/_index.tsx", (contents) =>
@@ -156,11 +238,11 @@ async function workflow({
   // React Fast Refresh cannot preserve state for a component when hooks are added or removed
   await expect(input).toHaveValue("");
   await input.type("stateful");
-  expect(pageErrors.length).toBeGreaterThan(0);
+  expect(page.errors.length).toBeGreaterThan(0);
   expect(
     // When adding a loader, a harmless error is logged to the browser console.
     // HMR works as intended, so this seems like a React Fast Refresh bug caused by off-screen rendering with old server data or something like that 🤷
-    pageErrors.filter((error) => {
+    page.errors.filter((error) => {
       let chromium =
         browserName === "chromium" &&
         error.message ===
@@ -175,7 +257,7 @@ async function workflow({
       return !expected;
     })
   ).toEqual([]);
-  pageErrors = [];
+  page.errors = [];
 
   // route: HDR
   await edit("app/routes/_index.tsx", (contents) =>
@@ -195,7 +277,7 @@ async function workflow({
   await expect(hmrStatus).toHaveText("HMR updated: 2");
   await expect(hdrStatus).toHaveText("HDR updated: 2");
   await expect(input).toHaveValue("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 
   // create new non-route component module
   await fs.writeFile(
@@ -220,7 +302,7 @@ async function workflow({
   await expect(component).toBeVisible();
   await expect(component).toHaveText("Component HMR: 0");
   await expect(input).toHaveValue("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 
   // non-route: HMR
   await edit("app/component.tsx", (contents) =>
@@ -229,7 +311,7 @@ async function workflow({
   await page.waitForLoadState("networkidle");
   await expect(component).toHaveText("Component HMR: 1");
   await expect(input).toHaveValue("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 
   // create new non-route server module
   await fs.writeFile(
@@ -259,7 +341,7 @@ async function workflow({
   await page.waitForLoadState("networkidle");
   await expect(hdrStatus).toHaveText("HDR updated: direct 0 & indirect 0");
   await expect(input).toHaveValue("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 
   // non-route: HDR for direct dependency
   await edit("app/direct-hdr-dep.ts", (contents) =>
@@ -268,7 +350,7 @@ async function workflow({
   await page.waitForLoadState("networkidle");
   await expect(hdrStatus).toHaveText("HDR updated: direct 1 & indirect 0");
   await expect(input).toHaveValue("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 
   // non-route: HDR for indirect dependency
   await edit("app/indirect-hdr-dep.ts", (contents) =>
@@ -277,7 +359,7 @@ async function workflow({
   await page.waitForLoadState("networkidle");
   await expect(hdrStatus).toHaveText("HDR updated: direct 1 & indirect 1");
   await expect(input).toHaveValue("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 
   // everything everywhere all at once
   await Promise.all([
@@ -303,5 +385,5 @@ async function workflow({
     "HDR updated: route & direct 2 & indirect 2"
   );
   await expect(input).toHaveValue("stateful");
-  expect(pageErrors).toEqual([]);
+  expect(page.errors).toEqual([]);
 }

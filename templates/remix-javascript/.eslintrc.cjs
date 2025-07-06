@@ -19,13 +19,15 @@ module.exports = {
     commonjs: true,
     es6: true,
   },
+  ignorePatterns: ["!**/.server", "!**/.client"],
 
   // Base config
   extends: ["eslint:recommended"],
 
   overrides: [
+    // React
     {
-      files: ["**/*.{js,jsx}"],
+      files: ["**/*.{js,jsx,ts,tsx}"],
       plugins: ["react", "jsx-a11y"],
       extends: [
         "plugin:react/recommended",
@@ -43,11 +45,14 @@ module.exports = {
           { name: "NavLink", linkAttribute: "to" },
         ],
       },
+      rules: {
+        "react/prop-types": "off",
+      },
     },
 
     // Node
     {
-      files: [".eslintrc.js"],
+      files: [".eslintrc.cjs"],
       env: {
         node: true,
       },

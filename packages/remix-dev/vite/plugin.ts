@@ -640,9 +640,33 @@ export const remixVitePlugin: RemixVitePlugin = (remixUserConfig = {}) => {
             );
           }
 
+
+  let resolvePluginConfig =
+    async (): Promise<ResolvedRemixVitePluginConfig> => {
+      let defaults = {
+        assetsBuildDirectory: "build/client",
+        serverBuildDirectory: "build/server",
+        serverBuildFile: "index.js",
+        publicPath: "/",
+        unstable_ssr: true,
+      } as const satisfies Partial<RemixVitePluginOptions>;
+
+      let extraConfig: Partial<RemixVitePluginOptions> = {};
+      let extraConfigPath = process.env.REMIX_VITE_EXTRA_CONFIG;
+      if (extraConfigPath) {
+        extraConfig = (await import(extraConfigPath)).default;
+      }
+
+      let pluginConfig = {
+        ...defaults,
+        ...options,
+        ...extraConfig,
+      };
+
           if (!preset.remixConfig) {
             return null;
           }
+
 
           let remixConfigPreset: VitePluginConfig = omit(
             await preset.remixConfig({ remixUserConfig }),
